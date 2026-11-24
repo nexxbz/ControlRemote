@@ -18,8 +18,18 @@ jobs:
         with:
           gradle-version: 8.9
       - name: Compilar APK debug
-        run: gradle assembleDebug
+        run: gradle assembleDebug --stacktrace 2>&1 | tee build.log
+      - name: Mostrar errores (si fallo)
+        if: failure()
+        run: |
+          echo "## Errores de compilación" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E "^e: |error:|What went wrong" -A2 build.log | head -60 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: control-remoto-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            build.log
