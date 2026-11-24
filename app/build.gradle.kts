@@ -4,19 +4,37 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Los pasa GitHub Actions: número de build (para las actualizaciones) y nombre del repo.
+val buildNumber = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 1
+val githubRepo = (project.findProperty("githubRepo") as String?) ?: "TU_USUARIO/ControlRemote"
+
 android {
     namespace = "com.example.remoto"
     compileSdk = 35
 
     defaultConfig {
         applicationId = "com.example.remoto"
-        minSdk = 26
+        minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = buildNumber
+        versionName = "1.0.$buildNumber"
+        buildConfigField("String", "GITHUB_REPO", "\"$githubRepo\"")
     }
 
-    buildFeatures { compose = true }
+    // Misma firma en todos los builds: así Android acepta instalar la actualización encima.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -37,5 +55,4 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation("dev.mobile:dadb:1.2.10")
 }
