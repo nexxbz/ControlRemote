@@ -70,10 +70,10 @@ fun RemoteScreen(deviceName: String, status: String, controller: RemoteControlle
 
         // Fila 1-2: volumen | mute, CC | brillo
         Row(Modifier.fillMaxWidth().height(224.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Pill(Modifier.weight(1f), Icons.AutoMirrored.Filled.VolumeUp, Icons.AutoMirrored.Filled.VolumeDown,
+            Pill(Modifier.weight(1f), Icons.Filled.VolumeUp, Icons.Filled.VolumeDown,
                 { controller.send(Key.VOL_UP) }, { controller.send(Key.VOL_DOWN) })
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Round(Modifier.weight(1f), Icons.AutoMirrored.Filled.VolumeOff) { controller.send(Key.MUTE) }
+                Round(Modifier.weight(1f), Icons.Filled.VolumeOff) { controller.send(Key.MUTE) }
                 Round(Modifier.weight(1f), Icons.Filled.Dialpad) { showNumbers = !showNumbers }
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
