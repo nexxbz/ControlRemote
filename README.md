@@ -6,6 +6,11 @@ Controla otro teléfono Android desde el tuyo **por wifi**. La misma app va en l
   pide el PIN la primera vez y abre el control.
 
 ## Qué controla
+La cruceta y OK funcionan como un control de TV (mueven el foco en las apps). En Android 13 o superior en el teléfono
+controlado usan las teclas de dirección reales del sistema; en versiones anteriores se mueve el foco por accesibilidad.
+El ícono ⋯ abre "Más botones", el teclado numérico y el teclado de texto con flechas, espacio, borrar e intro,
+y el ícono del mouse abre el panel táctil con franja de desplazamiento.
+
 Inicio, atrás, recientes, notificaciones, bloquear pantalla, volumen y mute, reproducir/pausar/adelantar/retroceder,
 brillo (con permiso), escribir texto y números, cursor táctil (mover, clic, mantener pulsado, desplazar) y las flechas
 (que deslizan la pantalla). El botón OK hace clic donde está el cursor.

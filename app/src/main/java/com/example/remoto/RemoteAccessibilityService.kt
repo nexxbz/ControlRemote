@@ -205,11 +205,18 @@ class RemoteAccessibilityService : AccessibilityService() {
             "FORWARD" -> media(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
             "BRIGHT_UP" -> brightness(25)
             "BRIGHT_DOWN" -> brightness(-25)
-            "OK" -> clickAtCursor(false)
-            "UP" -> swipe(0.5f, 0.35f, 0.5f, 0.65f)
-            "DOWN" -> swipe(0.5f, 0.65f, 0.5f, 0.35f)
-            "LEFT" -> swipe(0.25f, 0.5f, 0.75f, 0.5f)
-            "RIGHT" -> swipe(0.75f, 0.5f, 0.25f, 0.5f)
+            "OK" -> dpad(4)
+            "UP" -> dpad(0)
+            "DOWN" -> dpad(1)
+            "LEFT" -> dpad(2)
+            "RIGHT" -> dpad(3)
+            "STOP" -> media(KeyEvent.KEYCODE_MEDIA_STOP)
+            "PREV" -> media(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
+            "NEXT" -> media(KeyEvent.KEYCODE_MEDIA_NEXT)
+            "SCREENSHOT" -> performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
+            "SPACE" -> typeText(" ")
+            "BACKSPACE" -> backspace()
+            "ENTER" -> enter()
             else -> if (name.length == 2 && name[0] == 'N' && name[1].isDigit()) typeText(name.substring(1))
         }
     }
@@ -231,6 +238,65 @@ class RemoteAccessibilityService : AccessibilityService() {
         val current = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, 128)
         Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
         Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, (current + delta).coerceIn(1, 255))
+    }
+
+    /**
+     * Cruceta real. En Android 13+ el sistema ejecuta las teclas de dirección y OK como un control de TV
+     * (mueve el foco en cualquier app). En versiones anteriores se mueve el foco desde accesibilidad.
+     * dir: 0 arriba, 1 abajo, 2 izquierda, 3 derecha, 4 centro (OK).
+     */
+    private fun dpad(dir: Int) {
+        if (Build.VERSION.SDK_INT >= 33) {
+            val action = when (dir) {
+                0 -> GLOBAL_ACTION_DPAD_UP
+                1 -> GLOBAL_ACTION_DPAD_DOWN
+                2 -> GLOBAL_ACTION_DPAD_LEFT
+                3 -> GLOBAL_ACTION_DPAD_RIGHT
+                else -> GLOBAL_ACTION_DPAD_CENTER
+            }
+            if (performGlobalAction(action)) return
+        }
+        dpadFallback(dir)
+    }
+
+    private fun dpadFallback(dir: Int) {
+        val root = rootInActiveWindow
+        val current = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: root?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+        if (dir == 4) {
+            if (current != null && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+            clickAtCursor(false)
+            return
+        }
+        val direction = when (dir) {
+            0 -> View.FOCUS_UP
+            1 -> View.FOCUS_DOWN
+            2 -> View.FOCUS_LEFT
+            else -> View.FOCUS_RIGHT
+        }
+        val next = (current ?: root)?.focusSearch(direction)
+        if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+        when (dir) {
+            0 -> swipe(0.5f, 0.35f, 0.5f, 0.65f)
+            1 -> swipe(0.5f, 0.65f, 0.5f, 0.35f)
+            2 -> swipe(0.25f, 0.5f, 0.75f, 0.5f)
+            else -> swipe(0.75f, 0.5f, 0.25f, 0.5f)
+        }
+    }
+
+    private fun backspace() {
+        val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+        val current = if (node.isShowingHintText) "" else (node.text?.toString() ?: "")
+        if (current.isEmpty()) return
+        val args = Bundle()
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, current.dropLast(1))
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun enter() {
+        val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val ok = node?.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id) ?: false
+        if (!ok) dpad(4)
     }
 
     private fun typeText(text: String) {

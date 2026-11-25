@@ -200,18 +200,7 @@ fun App(prefs: SharedPreferences) {
         )
     }
 
-    if (showKeyboard) {
-        var text by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showKeyboard = false },
-            title = { Text("Escribir en el otro teléfono") },
-            text = { OutlinedTextField(text, { text = it }, singleLine = true) },
-            confirmButton = {
-                TextButton(onClick = { controller.sendText(text); showKeyboard = false }) { Text("Enviar") }
-            },
-            dismissButton = { TextButton(onClick = { showKeyboard = false }) { Text("Cancelar") } }
-        )
-    }
+    if (showKeyboard) KeyboardSheet(controller) { showKeyboard = false }
 
     if (showHelp) {
         AlertDialog(

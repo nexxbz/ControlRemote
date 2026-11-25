@@ -29,7 +29,9 @@ enum class Key {
     HOME, BACK, MENU, GUIDE, POWER, SETTINGS,
     VOL_UP, VOL_DOWN, MUTE, CAPTIONS,
     BRIGHT_UP, BRIGHT_DOWN,
-    REWIND, PLAY, PAUSE, FORWARD,
+    REWIND, PLAY, PAUSE, FORWARD, STOP, PREV, NEXT, REPEAT, SCREENSHOT,
+    RED, GREEN, BLUE, YELLOW,
+    SPACE, BACKSPACE, ENTER,
     N0, N1, N2, N3, N4, N5, N6, N7, N8, N9
 }
 
@@ -56,6 +58,7 @@ fun RemoteScreen(
     onDisconnect: () -> Unit
 ) {
     var showNumbers by remember { mutableStateOf(false) }
+    var showMore by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
 
     Column(
@@ -102,32 +105,14 @@ fun RemoteScreen(
                         { controller.send(Key.VOL_UP) }, { controller.send(Key.VOL_DOWN) })
                     Column(verticalArrangement = Arrangement.spacedBy(gap)) {
                         Round(cell, Icons.Filled.VolumeOff) { controller.send(Key.MUTE) }
-                        Round(cell, Icons.Filled.Dialpad) { showNumbers = !showNumbers }
+                        Round(cell, Icons.Filled.Dialpad) { showNumbers = true }
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(gap)) {
                         Round(cell, Icons.Filled.ClosedCaption) { controller.send(Key.CAPTIONS) }
-                        Round(cell, Icons.Filled.MoreHoriz) { controller.send(Key.SETTINGS) }
+                        Round(cell, Icons.Filled.MoreHoriz) { showMore = true }
                     }
                     Pill(cell, cell * 2 + gap, Icons.Filled.BrightnessHigh, Icons.Filled.BrightnessLow,
                         { controller.send(Key.BRIGHT_UP) }, { controller.send(Key.BRIGHT_DOWN) })
-                }
-
-                if (showNumbers) {
-                    val rows = listOf(
-                        listOf(Key.N1, Key.N2, Key.N3), listOf(Key.N4, Key.N5, Key.N6),
-                        listOf(Key.N7, Key.N8, Key.N9), listOf(Key.N0)
-                    )
-                    rows.forEach { r ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap)) {
-                            r.forEach { k ->
-                                Box(
-                                    Modifier.weight(1f).height(60.dp).clip(RoundedCornerShape(30.dp)).background(Btn)
-                                        .clickable { controller.send(k) },
-                                    contentAlignment = Alignment.Center
-                                ) { Text(k.name.removePrefix("N"), color = Ico, fontSize = 22.sp) }
-                            }
-                        }
-                    }
                 }
 
                 // Atrás, inicio, menú, encendido
@@ -158,6 +143,9 @@ fun RemoteScreen(
             }
         }
     }
+
+    if (showNumbers) NumberPadDialog(controller) { showNumbers = false }
+    if (showMore) MoreButtonsDialog(controller) { showMore = false }
 }
 
 @Composable
