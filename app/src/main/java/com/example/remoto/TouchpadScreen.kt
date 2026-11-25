@@ -37,12 +37,12 @@ fun TouchpadScreen(controller: RemoteController, onBack: () -> Unit) {
                 .pointerInput(Unit) {
                     detectDragGestures { change, drag ->
                         change.consume()
-                        controller.moveMouse((drag.x * 1.3f).toInt(), (drag.y * 1.3f).toInt())
+                        controller.moveMouse((drag.x * 2.2f).toInt(), (drag.y * 2.2f).toInt())
                     }
                 },
             contentAlignment = Alignment.Center
         ) {
-            Text("Desliza para mover el cursor\nToca para hacer clic", color = Color.Gray, textAlign = TextAlign.Center)
+            Text("Desliza para mover el cursor en el otro teléfono\nToca para hacer clic", color = Color.Gray, textAlign = TextAlign.Center)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = { controller.scroll(3) }, modifier = Modifier.weight(1f).height(52.dp)) { Text("Subir") }
@@ -50,7 +50,7 @@ fun TouchpadScreen(controller: RemoteController, onBack: () -> Unit) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = { controller.click(false) }, modifier = Modifier.weight(1f).height(52.dp)) { Text("Clic izquierdo") }
-            OutlinedButton(onClick = { controller.click(true) }, modifier = Modifier.weight(1f).height(52.dp)) { Text("Clic derecho") }
+            OutlinedButton(onClick = { controller.click(true) }, modifier = Modifier.weight(1f).height(52.dp)) { Text("Mantener pulsado") }
         }
     }
 }

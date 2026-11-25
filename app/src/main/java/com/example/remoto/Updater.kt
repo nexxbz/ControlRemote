@@ -14,10 +14,13 @@ import java.net.URL
 
 data class UpdateInfo(val versionName: String, val apkUrl: String)
 
+/** update != null: hay versión nueva. Si es null, message explica por qué (ya estás al día, repositorio privado, sin internet...). */
+data class CheckResult(val update: UpdateInfo?, val message: String)
+
 /** Busca el último Release del repositorio de GitHub y, si es más nuevo, lo descarga e instala. */
 object Updater {
 
-    suspend fun check(): UpdateInfo? = withContext(Dispatchers.IO) {
+    suspend fun check(): CheckResult = withContext(Dispatchers.IO) {
         try {
             val url = URL("https://api.github.com/repos/${BuildConfig.GITHUB_REPO}/releases/latest")
             val conn = url.openConnection() as HttpURLConnection
@@ -25,13 +28,25 @@ object Updater {
             conn.setRequestProperty("User-Agent", "ControlRemoto")
             conn.connectTimeout = 8000
             conn.readTimeout = 8000
-            if (conn.responseCode != 200) return@withContext null
+            val code = conn.responseCode
+            if (code == 404) {
+                return@withContext CheckResult(null, "No hay Releases publicados o el repositorio es privado. Hazlo público.")
+            }
+            if (code != 200) {
+                return@withContext CheckResult(null, "GitHub respondió con el código $code.")
+            }
 
             val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
             // Los releases se llaman "build-<número>"; el número es el versionCode de la app.
-            val number = json.getString("tag_name").substringAfterLast("-").toIntOrNull()
-                ?: return@withContext null
-            if (number <= BuildConfig.VERSION_CODE) return@withContext null
+            val tag = json.getString("tag_name")
+            val number = tag.substringAfterLast("-").toIntOrNull()
+                ?: return@withContext CheckResult(null, "El Release \"$tag\" no tiene un número de versión válido.")
+            if (number <= BuildConfig.VERSION_CODE) {
+                return@withContext CheckResult(
+                    null,
+                    "Ya tienes la última versión (instalada 1.0.${BuildConfig.VERSION_CODE}, último Release 1.0.$number)."
+                )
+            }
 
             val assets = json.getJSONArray("assets")
             var apk: String? = null
@@ -42,9 +57,10 @@ object Updater {
                     break
                 }
             }
-            if (apk == null) null else UpdateInfo("1.0.$number", apk)
+            if (apk == null) CheckResult(null, "El Release 1.0.$number no tiene un archivo APK.")
+            else CheckResult(UpdateInfo("1.0.$number", apk), "")
         } catch (e: Exception) {
-            null
+            CheckResult(null, "No se pudo consultar GitHub. ¿Hay internet?")
         }
     }
 

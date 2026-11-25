@@ -23,19 +23,14 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/**
- * Teclas del control. consumer = true: página "Consumer" del HID (volumen, inicio, atrás...).
- * consumer = false: página "Teclado" (flechas, Enter, números).
- */
-enum class Key(val consumer: Boolean, val usage: Int) {
-    UP(false, 0x52), DOWN(false, 0x51), LEFT(false, 0x50), RIGHT(false, 0x4F), OK(false, 0x28),
-    HOME(true, 0x223), BACK(true, 0x224), MENU(true, 0x40), GUIDE(true, 0x8D), POWER(true, 0x30),
-    SETTINGS(false, 0x65),
-    VOL_UP(true, 0xE9), VOL_DOWN(true, 0xEA), MUTE(true, 0xE2), CAPTIONS(true, 0x61),
-    BRIGHT_UP(true, 0x6F), BRIGHT_DOWN(true, 0x70),
-    REWIND(true, 0xB4), PLAY(true, 0xB0), PAUSE(true, 0xB1), FORWARD(true, 0xB3),
-    N0(false, 0x27), N1(false, 0x1E), N2(false, 0x1F), N3(false, 0x20), N4(false, 0x21),
-    N5(false, 0x22), N6(false, 0x23), N7(false, 0x24), N8(false, 0x25), N9(false, 0x26)
+/** Teclas del control. Se envían por wifi como texto con su nombre (por ejemplo "K:VOL_UP"). */
+enum class Key {
+    UP, DOWN, LEFT, RIGHT, OK,
+    HOME, BACK, MENU, GUIDE, POWER, SETTINGS,
+    VOL_UP, VOL_DOWN, MUTE, CAPTIONS,
+    BRIGHT_UP, BRIGHT_DOWN,
+    REWIND, PLAY, PAUSE, FORWARD,
+    N0, N1, N2, N3, N4, N5, N6, N7, N8, N9
 }
 
 interface RemoteController {
