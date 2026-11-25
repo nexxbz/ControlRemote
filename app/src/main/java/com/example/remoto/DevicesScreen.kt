@@ -38,11 +38,15 @@ fun deviceIcon(d: BluetoothDevice): ImageVector {
 @Composable
 fun DevicesScreen(
     status: String,
+    ready: Boolean,
+    failed: Boolean,
     permissionGranted: Boolean,
     devices: List<BluetoothDevice>,
     lastAddress: String?,
     onRequestPermission: () -> Unit,
+    onRetry: () -> Unit,
     onPair: () -> Unit,
+    onSettingsBt: () -> Unit,
     onHelp: () -> Unit,
     onSettings: () -> Unit,
     onPick: (BluetoothDevice) -> Unit
@@ -68,9 +72,20 @@ fun DevicesScreen(
                 Text("Información", color = Ico, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             }
             Text(
-                if (status.isNotEmpty()) status else "Ante cualquier problema, consulte la sección de ayuda.",
+                when {
+                    status.isNotEmpty() -> status
+                    !permissionGranted -> "Falta el permiso de Bluetooth."
+                    !ready -> "Iniciando el control Bluetooth…"
+                    else -> "Listo. Toca un dispositivo emparejado para conectar."
+                },
                 color = Ico, fontSize = 16.sp
             )
+            if (failed) Button(onClick = onRetry) { Text("Reintentar") }
+        }
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onPair, modifier = Modifier.weight(1f)) { Text("Hacer visible este celular", fontSize = 13.sp) }
+            OutlinedButton(onClick = onSettingsBt, modifier = Modifier.weight(1f)) { Text("Ajustes de Bluetooth", fontSize = 13.sp) }
         }
 
         Text("Dispositivos emparejados", color = Color.Gray, fontSize = 16.sp, modifier = Modifier.padding(top = 4.dp))

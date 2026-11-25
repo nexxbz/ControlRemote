@@ -1,6 +1,7 @@
 package com.example.remoto
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.content.Intent
@@ -60,9 +61,20 @@ fun App(prefs: SharedPreferences) {
 
     // Permiso de Bluetooth
     var granted by remember { mutableStateOf(hasBtPermission(context)) }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok -> granted = ok }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        granted = result[Manifest.permission.BLUETOOTH_CONNECT] == true || hasBtPermission(context)
+    }
+    fun requestBtPermissions() {
+        if (Build.VERSION.SDK_INT >= 31) {
+            launcher.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE))
+        }
+    }
     LaunchedEffect(Unit) {
-        if (!granted && Build.VERSION.SDK_INT >= 31) launcher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        val missing = Build.VERSION.SDK_INT >= 31 && (
+            !hasBtPermission(context) ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED
+            )
+        if (missing) requestBtPermissions()
     }
     LaunchedEffect(granted) { if (granted) controller.start() }
 
@@ -81,7 +93,16 @@ fun App(prefs: SharedPreferences) {
         lastAddress = d.address
         prefs.edit().putString("last", d.address).apply()
         controller.connect(d)
-        screen = Screen.REMOTE
+        if (controller.connectedAddress == d.address) screen = Screen.REMOTE
+    }
+
+    // Se abre el control solo cuando la conexión se establece de verdad
+    LaunchedEffect(controller.connectedAddress) {
+        val addr = controller.connectedAddress
+        if (addr != null && screen == Screen.DEVICES) {
+            selected = controller.bonded().firstOrNull { it.address == addr } ?: selected
+            screen = Screen.REMOTE
+        }
     }
 
     // "Auto": al estar listo, se conecta solo al último dispositivo usado
@@ -98,11 +119,21 @@ fun App(prefs: SharedPreferences) {
     when (screen) {
         Screen.DEVICES -> DevicesScreen(
             status = controller.status,
+            ready = controller.ready,
+            failed = controller.failed,
             permissionGranted = granted,
             devices = devices,
             lastAddress = lastAddress,
-            onRequestPermission = { launcher.launch(Manifest.permission.BLUETOOTH_CONNECT) },
-            onPair = { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) },
+            onRequestPermission = { requestBtPermissions() },
+            onRetry = { controller.retry() },
+            onPair = {
+                val i = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
+                try { context.startActivity(i) } catch (e: Exception) {
+                    context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                }
+            },
+            onSettingsBt = { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) },
             onHelp = { showHelp = true },
             onSettings = { showSettings = true },
             onPick = { connectTo(it) }
@@ -141,11 +172,12 @@ fun App(prefs: SharedPreferences) {
             title = { Text("Ayuda") },
             text = {
                 Text(
-                    "1. Toca el ícono de Bluetooth y empareja tu TV o teléfono con este celular.\n\n" +
-                        "2. Vuelve aquí y toca el dispositivo en la lista.\n\n" +
-                        "3. Si no responde, en el otro dispositivo busca este celular en sus ajustes de Bluetooth " +
-                        "y empareja de nuevo.\n\n" +
-                        "Cierra otras apps de control remoto Bluetooth: solo una puede usar el Bluetooth a la vez."
+                    "1. Toca \"Hacer visible este celular\" y, en tu TV o el otro teléfono, busca este celular en " +
+                        "los ajustes de Bluetooth y empareja.\n\n" +
+                        "2. Vuelve aquí y toca el dispositivo en la lista. El control se abre cuando conecta.\n\n" +
+                        "3. Si no conecta, olvida este celular en el otro dispositivo y empareja de nuevo.\n\n" +
+                        "Cierra otras apps de control remoto Bluetooth (Ajustes > Apps > Forzar detención): " +
+                        "solo una puede usar el Bluetooth a la vez."
                 )
             },
             confirmButton = { TextButton(onClick = { showHelp = false }) { Text("Entendido") } }

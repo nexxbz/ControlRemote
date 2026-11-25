@@ -28,6 +28,8 @@ class BtHidController(private val context: Context) : RemoteController {
         private set
     var connectedAddress by mutableStateOf<String?>(null)
         private set
+    var failed by mutableStateOf(false)
+        private set
 
     private val adapter: BluetoothAdapter? =
         context.getSystemService(BluetoothManager::class.java)?.adapter
@@ -35,11 +37,20 @@ class BtHidController(private val context: Context) : RemoteController {
     private var hid: BluetoothHidDevice? = null
     private var host: BluetoothDevice? = null
     private var started = false
+    private var stopping = false
+    private val timeout = Runnable {
+        if (connectedAddress == null) {
+            status = "No respondió. En el otro dispositivo abre sus ajustes de Bluetooth, olvida este celular " +
+                "y empareja de nuevo. Aquí toca \"Hacer visible este celular\"."
+        }
+    }
 
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
             ready = registered
-            status = if (registered) "" else "No se pudo registrar el control Bluetooth."
+            failed = !registered && !stopping
+            if (registered) status = ""
+            else if (!stopping) status = "Otra app de control remoto Bluetooth está usando el Bluetooth. Ciérrala (Ajustes > Apps > Forzar detención) y toca Reintentar."
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice?, state: Int) {
@@ -47,6 +58,7 @@ class BtHidController(private val context: Context) : RemoteController {
             val name = device.name ?: device.address
             when (state) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    main.removeCallbacks(timeout)
                     host = device
                     connectedAddress = device.address
                     status = "Conectado a $name"
@@ -73,6 +85,8 @@ class BtHidController(private val context: Context) : RemoteController {
             return
         }
         started = true
+        stopping = false
+        failed = false
         val ok = a.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                 if (profile != BluetoothProfile.HID_DEVICE) return
@@ -83,7 +97,10 @@ class BtHidController(private val context: Context) : RemoteController {
                     BluetoothHidDevice.SUBCLASS1_COMBO, DESCRIPTOR
                 )
                 val registered = h.registerApp(sdp, null, null, ContextCompat.getMainExecutor(context), callback)
-                if (!registered) status = "Este teléfono no permite usar el control Bluetooth (HID)."
+                if (!registered) {
+                    failed = true
+                    status = "Este teléfono no permite usar el control Bluetooth (HID) o está ocupado por otra app."
+                }
             }
 
             override fun onServiceDisconnected(profile: Int) {
@@ -114,7 +131,12 @@ class BtHidController(private val context: Context) : RemoteController {
         try {
             host?.let { h.disconnect(it) }
             status = "Conectando a ${device.name ?: device.address}…"
-            if (!h.connect(device)) status = "No se pudo conectar. Revisa que esté emparejado y con Bluetooth activo."
+            if (!h.connect(device)) {
+                status = "No se pudo conectar. Revisa que esté emparejado y con Bluetooth activo."
+            } else {
+                main.removeCallbacks(timeout)
+                main.postDelayed(timeout, 12000)
+            }
         } catch (e: Exception) {
             status = "No se pudo conectar."
         }
@@ -127,7 +149,15 @@ class BtHidController(private val context: Context) : RemoteController {
         }
     }
 
+    fun retry() {
+        stop()
+        status = "Reintentando…"
+        main.postDelayed({ start() }, 700)
+    }
+
     fun stop() {
+        stopping = true
+        main.removeCallbacks(timeout)
         try {
             hid?.unregisterApp()
             adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, hid)
