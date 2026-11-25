@@ -29,9 +29,21 @@ fun localIpv4(context: Context): String? {
         ?.hostAddress
 }
 
+private fun androidVersionName(sdk: Int): String = when {
+    sdk >= 35 -> "15"
+    sdk == 34 -> "14"
+    sdk == 33 -> "13"
+    sdk >= 31 -> "12"
+    sdk == 30 -> "11"
+    sdk == 29 -> "10"
+    sdk == 28 -> "9"
+    else -> sdk.toString()
+}
+
 /**
  * Cliente: se conecta por wifi (TCP) a otro teléfono que tenga esta app con el servicio activado
- * y le envía las órdenes como líneas de texto.
+ * y le envía las órdenes como líneas de texto. Si la conexión se cae (por ejemplo tras apagar la pantalla),
+ * se vuelve a conectar sola con el mismo PIN.
  */
 class WifiController : RemoteController {
 
@@ -44,55 +56,71 @@ class WifiController : RemoteController {
     private val main = Handler(Looper.getMainLooper())
     private var socket: Socket? = null
     private var out: OutputStream? = null
+    private var lastHost: String? = null
+    private var lastPort = CONTROL_PORT
+    private var lastPin = ""
+    private var infoText = "Conectado"
+
+    /** 0 = conectado, 1 = PIN incorrecto, 2 = no se pudo / rechazado. Se llama desde el hilo de red. */
+    private fun handshake(host: String, port: Int, pin: String): Int {
+        closeQuietly()
+        return try {
+            val s = Socket()
+            s.connect(InetSocketAddress(host, port), 4000)
+            s.tcpNoDelay = true
+            s.soTimeout = 5000
+            val o = s.getOutputStream()
+            o.write("HELLO $pin\n".toByteArray(Charsets.UTF_8))
+            o.flush()
+            val reply = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8)).readLine()
+            if (reply != null && reply.startsWith("OK")) {
+                s.soTimeout = 0
+                socket = s
+                out = o
+                val sdk = reply.substringAfter('|', "").trim().toIntOrNull()
+                infoText = when {
+                    sdk == null -> "Conectado"
+                    sdk >= 33 -> "Conectado · Android ${androidVersionName(sdk)}"
+                    else -> "Conectado · Android ${androidVersionName(sdk)} (cruceta en modo compatible)"
+                }
+                0
+            } else {
+                s.close()
+                if (reply == "NO") 1 else 2
+            }
+        } catch (e: Exception) {
+            2
+        }
+    }
 
     fun connect(host: String, port: Int, pin: String, onDone: (ok: Boolean, pinWrong: Boolean) -> Unit) {
         status = "Conectando a $host…"
+        lastHost = host
+        lastPort = port
+        lastPin = pin
         io.execute {
-            closeQuietly()
-            try {
-                val s = Socket()
-                s.connect(InetSocketAddress(host, port), 4000)
-                s.tcpNoDelay = true
-                s.soTimeout = 5000
-                val o = s.getOutputStream()
-                o.write("HELLO $pin\n".toByteArray(Charsets.UTF_8))
-                o.flush()
-                val reply = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8)).readLine()
-                if (reply != null && reply.startsWith("OK")) {
-                    s.soTimeout = 0
-                    socket = s
-                    out = o
-                    main.post {
-                        connected = true
-                        status = "Conectado"
-                        onDone(true, false)
-                    }
-                } else {
-                    s.close()
-                    val wrong = reply == "NO"
-                    main.post {
-                        connected = false
-                        status = if (wrong) "PIN incorrecto." else "El otro teléfono rechazó la conexión."
-                        onDone(false, wrong)
-                    }
+            val result = handshake(host, port, pin)
+            main.post {
+                connected = result == 0
+                status = when (result) {
+                    0 -> infoText
+                    1 -> "PIN incorrecto."
+                    else -> "No se pudo conectar. Revisa que el servicio esté activado en el otro teléfono y que ambos estén en la misma wifi."
                 }
-            } catch (e: Exception) {
-                main.post {
-                    connected = false
-                    status = "No se pudo conectar. Revisa que el servicio esté activado en el otro teléfono y que ambos estén en la misma wifi."
-                    onDone(false, false)
-                }
+                onDone(result == 0, result == 1)
             }
         }
     }
 
     fun disconnect() {
+        lastHost = null
         io.execute { closeQuietly() }
         connected = false
         status = "Desconectado"
     }
 
     fun stop() {
+        lastHost = null
         io.execute { closeQuietly() }
         io.shutdown()
     }
@@ -106,22 +134,33 @@ class WifiController : RemoteController {
         out = null
     }
 
+    private fun write(line: String): Boolean {
+        val o = out ?: return false
+        return try {
+            o.write((line + "\n").toByteArray(Charsets.UTF_8))
+            o.flush()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     private fun sendLine(line: String) {
         io.execute {
-            val o = out
-            if (o == null) {
-                main.post { status = "Sin conexión. Elige un dispositivo." }
+            if (write(line)) return@execute
+            // Conexión caída: se intenta reconectar una vez y reenviar
+            val host = lastHost
+            if (host != null && handshake(host, lastPort, lastPin) == 0 && write(line)) {
+                main.post {
+                    connected = true
+                    status = infoText
+                }
                 return@execute
             }
-            try {
-                o.write((line + "\n").toByteArray(Charsets.UTF_8))
-                o.flush()
-            } catch (e: Exception) {
-                closeQuietly()
-                main.post {
-                    connected = false
-                    status = "Conexión perdida."
-                }
+            closeQuietly()
+            main.post {
+                connected = false
+                status = if (host == null) "Sin conexión. Elige un dispositivo." else "Conexión perdida. Revisa que el otro teléfono esté encendido y en la misma wifi."
             }
         }
     }

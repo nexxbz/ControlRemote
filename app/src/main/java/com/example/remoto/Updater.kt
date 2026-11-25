@@ -20,25 +20,29 @@ data class CheckResult(val update: UpdateInfo?, val message: String)
 /** Busca el último Release del repositorio de GitHub y, si es más nuevo, lo descarga e instala. */
 object Updater {
 
+    /**
+     * Pregunta a github.com cuál es el último Release SIN usar la API (la API da error 403 por límite de
+     * consultas). La página /releases/latest redirige a /releases/tag/build-N; de ahí sale el número.
+     */
     suspend fun check(): CheckResult = withContext(Dispatchers.IO) {
         try {
-            val url = URL("https://api.github.com/repos/${BuildConfig.GITHUB_REPO}/releases/latest")
-            val conn = url.openConnection() as HttpURLConnection
-            conn.setRequestProperty("Accept", "application/vnd.github+json")
-            conn.setRequestProperty("User-Agent", "ControlRemoto")
+            val repo = BuildConfig.GITHUB_REPO
+            val conn = URL("https://github.com/$repo/releases/latest").openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("User-Agent", "ControlRemote")
             conn.connectTimeout = 8000
             conn.readTimeout = 8000
             val code = conn.responseCode
             if (code == 404) {
                 return@withContext CheckResult(null, "No hay Releases publicados o el repositorio es privado. Hazlo público.")
             }
-            if (code != 200) {
+            val location = conn.getHeaderField("Location")
+            if (code !in 300..399 || location == null) {
                 return@withContext CheckResult(null, "GitHub respondió con el código $code.")
             }
 
-            val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
             // Los releases se llaman "build-<número>"; el número es el versionCode de la app.
-            val tag = json.getString("tag_name")
+            val tag = location.substringAfter("/tag/", "").substringBefore('?').substringBefore('/')
             val number = tag.substringAfterLast("-").toIntOrNull()
                 ?: return@withContext CheckResult(null, "El Release \"$tag\" no tiene un número de versión válido.")
             if (number <= BuildConfig.VERSION_CODE) {
@@ -47,18 +51,7 @@ object Updater {
                     "Ya tienes la última versión (instalada 1.0.${BuildConfig.VERSION_CODE}, último Release 1.0.$number)."
                 )
             }
-
-            val assets = json.getJSONArray("assets")
-            var apk: String? = null
-            for (i in 0 until assets.length()) {
-                val a = assets.getJSONObject(i)
-                if (a.getString("name").endsWith(".apk")) {
-                    apk = a.getString("browser_download_url")
-                    break
-                }
-            }
-            if (apk == null) CheckResult(null, "El Release 1.0.$number no tiene un archivo APK.")
-            else CheckResult(UpdateInfo("1.0.$number", apk), "")
+            CheckResult(UpdateInfo("1.0.$number", "https://github.com/$repo/releases/download/$tag/app-debug.apk"), "")
         } catch (e: Exception) {
             CheckResult(null, "No se pudo consultar GitHub. ¿Hay internet?")
         }
@@ -85,6 +78,7 @@ object Updater {
                     }
                 }
             }
+            if (out.length() < 100_000) throw java.io.IOException("Descarga incompleta")
             out
         }
 

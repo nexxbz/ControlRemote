@@ -10,11 +10,13 @@ import android.graphics.Path
 import android.graphics.PixelFormat
 import android.media.AudioManager
 import android.net.nsd.NsdManager
+import android.net.wifi.WifiManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
@@ -64,7 +66,14 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var cursorLp: WindowManager.LayoutParams? = null
     private var cx = 0f
     private var cy = 0f
-    private val hideCursor = Runnable { cursor?.visibility = View.GONE }
+    private var cursorActive = false
+    private val hideCursor = Runnable {
+        cursor?.visibility = View.GONE
+        cursorActive = false
+    }
+    private var cpuLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private val releaseAwake = Runnable { releaseAwakeLocks() }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -90,6 +99,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun shutdown() {
+        releaseAwakeLocks()
         try {
             server?.close()
         } catch (e: Exception) {
@@ -133,7 +143,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                 out.flush()
                 return
             }
-            out.write("OK ${Build.MODEL}\n".toByteArray())
+            out.write("OK ${Build.MODEL}|${Build.VERSION.SDK_INT}\n".toByteArray())
             out.flush()
             client.soTimeout = 0
             while (true) {
@@ -195,7 +205,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             "BACK" -> performGlobalAction(GLOBAL_ACTION_BACK)
             "MENU" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
             "SETTINGS" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
-            "POWER" -> performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+            "POWER" -> power()
             "VOL_UP" -> volume(AudioManager.ADJUST_RAISE)
             "VOL_DOWN" -> volume(AudioManager.ADJUST_LOWER)
             "MUTE" -> volume(AudioManager.ADJUST_TOGGLE_MUTE)
@@ -259,29 +269,112 @@ class RemoteAccessibilityService : AccessibilityService() {
         dpadFallback(dir)
     }
 
+    /** Cruceta por accesibilidad (Android 12 o menor): mueve el foco, nunca toca la pantalla. */
     private fun dpadFallback(dir: Int) {
-        val root = rootInActiveWindow
-        val current = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?: root?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+        val root = rootInActiveWindow ?: return
+        val current = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+
         if (dir == 4) {
-            if (current != null && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
-            clickAtCursor(false)
+            // OK: pulsar el elemento enfocado (o el cursor si se acaba de usar el panel táctil)
+            var n = current
+            while (n != null) {
+                if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+                n = n.parent
+            }
+            if (cursorActive) clickAtCursor(false)
             return
         }
+
+        // Sin foco todavía: la primera flecha enfoca el primer elemento, como en un control de TV
+        if (current == null) {
+            firstFocusable(root)?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            return
+        }
+
         val direction = when (dir) {
             0 -> View.FOCUS_UP
             1 -> View.FOCUS_DOWN
             2 -> View.FOCUS_LEFT
             else -> View.FOCUS_RIGHT
         }
-        val next = (current ?: root)?.focusSearch(direction)
+        val next = current.focusSearch(direction)
         if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
-        when (dir) {
-            0 -> swipe(0.5f, 0.35f, 0.5f, 0.65f)
-            1 -> swipe(0.5f, 0.65f, 0.5f, 0.35f)
-            2 -> swipe(0.25f, 0.5f, 0.75f, 0.5f)
-            else -> swipe(0.75f, 0.5f, 0.25f, 0.5f)
+
+        // No hay más elementos en esa dirección: desplazar la lista si se puede
+        val scroll = when (dir) {
+            0 -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
+            1 -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
+            2 -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
+            else -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
         }
+        var n: AccessibilityNodeInfo? = current
+        while (n != null) {
+            if (n.isScrollable && n.performAction(scroll)) return
+            n = n.parent
+        }
+    }
+
+    private fun firstFocusable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        if (node.isFocusable && node.isVisibleToUser && node.isEnabled && node.childCount == 0) return node
+        for (i in 0 until node.childCount) {
+            val found = firstFocusable(node.getChild(i))
+            if (found != null) return found
+        }
+        return null
+    }
+
+    // ---------- Encender / apagar ----------
+
+    /** Un solo botón: si la pantalla está encendida la apaga; si está apagada la enciende. */
+    private fun power() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isInteractive) {
+            holdAwakeForWake()
+            performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+        } else {
+            wakeScreen()
+        }
+    }
+
+    /** Con la pantalla apagada se mantiene la conexión viva un rato para poder volver a encenderla. */
+    @Suppress("DEPRECATION")
+    private fun holdAwakeForWake() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (cpuLock == null) cpuLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "controlremoto:cpu")
+            cpuLock?.acquire(30 * 60 * 1000L)
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            if (wifiLock == null) wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "controlremoto:wifi")
+            if (wifiLock?.isHeld == false) wifiLock?.acquire()
+            main.removeCallbacks(releaseAwake)
+            main.postDelayed(releaseAwake, 30 * 60 * 1000L)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun releaseAwakeLocks() {
+        try {
+            if (cpuLock?.isHeld == true) cpuLock?.release()
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (e: Exception) {
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun wakeScreen() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wl = pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
+                "controlremoto:wake"
+            )
+            wl.acquire(5000)
+        } catch (e: Exception) {
+        }
+        main.removeCallbacks(releaseAwake)
+        releaseAwakeLocks()
     }
 
     private fun backspace() {
@@ -386,6 +479,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
         }
         cursor?.visibility = View.VISIBLE
+        cursorActive = true
         main.removeCallbacks(hideCursor)
         main.postDelayed(hideCursor, 4000)
     }
