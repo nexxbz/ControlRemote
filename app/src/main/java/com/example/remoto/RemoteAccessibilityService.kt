@@ -278,7 +278,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
             if (performGlobalAction(action)) return
         }
-        if (dir == 4) okPress() else moveVirtual(dir, true)
+        if (dir == 4) okPress() else if (!moveNative(dir)) moveVirtual(dir, true)
     }
 
     // ---------- Cruceta por pantalla (Android 12 o menor, o si el sistema no la ejecuta) ----------
@@ -294,6 +294,32 @@ class RemoteAccessibilityService : AccessibilityService() {
             out.add(Cand(node, r))
         }
         for (i in 0 until node.childCount) collect(node.getChild(i), out, depth + 1)
+    }
+
+    /**
+     * Si la app ya tiene un elemento con foco (como las apps de TV), se usa la navegación nativa del sistema:
+     * el foco se mueve con el mismo buscador de foco que usan las flechas de un teclado y la app dibuja su
+     * propio resaltado. Devuelve false si no hay foco y entonces se usa el recuadro.
+     */
+    private fun moveNative(dir: Int): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val current = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        val direction = when (dir) {
+            0 -> View.FOCUS_UP
+            1 -> View.FOCUS_DOWN
+            2 -> View.FOCUS_LEFT
+            else -> View.FOCUS_RIGHT
+        }
+        val next = current.focusSearch(direction)
+        if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
+            removeRing()
+            return true
+        }
+        // Borde de la lista: se desplaza como lo haría la app
+        val r = Rect()
+        current.getBoundsInScreen(r)
+        scrollForDirection(root, r, dir)
+        return true
     }
 
     private fun moveVirtual(dir: Int, retry: Boolean) {
