@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -21,41 +22,70 @@ import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private lateinit var controller: WifiController
+    private lateinit var settings: AppSettings
+    private var remoteVisible = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        controller = WifiController()
+        settings = AppSettings(this)
         val prefs = getSharedPreferences("ajustes", Context.MODE_PRIVATE)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                App(prefs)
+                App(prefs, controller, settings) { remoteVisible = it }
             }
         }
     }
+
+    // Botones de volumen del teléfono -> volumen del otro teléfono (si se activó en Ajustes)
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (remoteVisible && settings.volumeKeys) {
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                controller.send(Key.VOL_UP)
+                return true
+            }
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                controller.send(Key.VOL_DOWN)
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onDestroy() {
+        controller.stop()
+        super.onDestroy()
+    }
 }
 
-private enum class Screen { DEVICES, REMOTE, TOUCHPAD, RECEIVER }
+private enum class Screen { DEVICES, REMOTE, RECEIVER, SETTINGS }
 
 @Composable
-fun App(prefs: SharedPreferences) {
+fun App(
+    prefs: SharedPreferences,
+    controller: WifiController,
+    settings: AppSettings,
+    onRemoteVisible: (Boolean) -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val store = remember { PeerStore(context) }
-    val controller = remember { WifiController() }
-    DisposableEffect(Unit) { onDispose { controller.stop() } }
 
     var screen by remember { mutableStateOf(Screen.DEVICES) }
     var saved by remember { mutableStateOf(store.load()) }
     val discovered = remember { mutableStateListOf<Peer>() }
     var selectedName by remember { mutableStateOf<String?>(null) }
-    var lastName by remember { mutableStateOf(prefs.getString("last", null)) }
     var askPin by remember { mutableStateOf<Peer?>(null) }
     var tick by remember { mutableIntStateOf(0) }
     var pinText by remember { mutableStateOf(ReceiverPin.get(context)) }
     var showHelp by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
     var showKeyboard by remember { mutableStateOf(false) }
     var update by remember { mutableStateOf<UpdateInfo?>(null) }
     var progress by remember { mutableStateOf<Int?>(null) }
     var autoTried by remember { mutableStateOf(false) }
+
+    LaunchedEffect(screen) { onRemoteVisible(screen == Screen.REMOTE) }
 
     // Al volver a la app (por ejemplo de Accesibilidad) se actualiza el estado
     DisposableEffect(Unit) {
@@ -67,7 +97,7 @@ fun App(prefs: SharedPreferences) {
 
     val ownIp = remember(tick) { localIpv4(context) }
 
-    // Búsqueda de teléfonos en la red
+    // Búsqueda de teléfonos con la app en la red
     DisposableEffect(tick) {
         val d = WifiDiscovery(
             context,
@@ -86,13 +116,15 @@ fun App(prefs: SharedPreferences) {
     val peers = mergePeers(saved, discovered.toList())
     val online = discovered.map { it.name }.toSet()
 
+    fun savePeer(p: Peer) {
+        saved = saved.filter { it.name != p.name } + p
+        store.save(saved)
+    }
+
     fun connectPeer(p: Peer, pin: String) {
         controller.connect(p.host, p.port, pin) { ok, pinWrong ->
             if (ok) {
-                saved = saved.filter { it.name != p.name } + Peer(p.name, p.host, p.port, pin)
-                store.save(saved)
-                lastName = p.name
-                prefs.edit().putString("last", p.name).apply()
+                savePeer(Peer(p.name, p.host, p.port, pin, p.fav, p.auto))
                 selectedName = p.name
                 screen = Screen.REMOTE
             } else if (pinWrong) {
@@ -101,11 +133,10 @@ fun App(prefs: SharedPreferences) {
         }
     }
 
-    // "Auto": se conecta solo al último teléfono usado cuando aparece en la red
+    // Conexión automática: solo para el dispositivo que se marcó con "Conexión automática"
     LaunchedEffect(discovered.size) {
         if (!autoTried && screen == Screen.DEVICES) {
-            val last = prefs.getString("last", null)
-            val p = peers.firstOrNull { it.name == last && it.pin != null && it.name in online }
+            val p = peers.firstOrNull { it.auto && it.pin != null && it.name in online }
             val pin = p?.pin
             if (p != null && pin != null) {
                 autoTried = true
@@ -120,24 +151,27 @@ fun App(prefs: SharedPreferences) {
     when (screen) {
         Screen.DEVICES -> DevicesScreen(
             status = controller.status,
-            peers = peers,
+            favorites = peers.filter { it.fav },
+            others = peers.filter { !it.fav },
             online = online,
-            lastName = lastName,
             onPick = { p ->
                 val pin = p.pin
                 if (pin != null) connectPeer(p, pin) else askPin = p
+            },
+            onToggleFav = { p -> savePeer(p.copy(fav = !p.fav)) },
+            onToggleAuto = { p ->
+                // solo un dispositivo puede tener conexión automática
+                saved = saved.map { it.copy(auto = false) }
+                savePeer(p.copy(auto = !p.auto))
             },
             onForget = { p ->
                 saved = saved.filter { it.name != p.name }
                 store.save(saved)
             },
-            onAdd = { p ->
-                saved = saved.filter { it.name != p.name } + p
-                store.save(saved)
-            },
+            onAdd = { p -> savePeer(p) },
             onReceiver = { screen = Screen.RECEIVER },
             onHelp = { showHelp = true },
-            onSettings = { showSettings = true }
+            onSettings = { screen = Screen.SETTINGS }
         )
         Screen.REMOTE -> {
             BackHandler { screen = Screen.DEVICES }
@@ -145,13 +179,12 @@ fun App(prefs: SharedPreferences) {
                 deviceName = selectedName ?: "Control",
                 status = controller.status,
                 controller = controller,
-                onMouse = { screen = Screen.TOUCHPAD },
+                settings = settings,
                 onKeyboard = { showKeyboard = true },
                 onDevices = { screen = Screen.DEVICES },
                 onDisconnect = { controller.disconnect(); screen = Screen.DEVICES }
             )
         }
-        Screen.TOUCHPAD -> TouchpadScreen(controller) { screen = Screen.REMOTE }
         Screen.RECEIVER -> {
             val enabled = remember(tick) { isServiceEnabled(context) }
             val canWrite = remember(tick) { Settings.System.canWrite(context) }
@@ -175,6 +208,18 @@ fun App(prefs: SharedPreferences) {
                 onBack = { screen = Screen.DEVICES }
             )
         }
+        Screen.SETTINGS -> SettingsScreen(
+            settings = settings,
+            version = BuildConfig.VERSION_NAME,
+            onCheckUpdate = {
+                scope.launch {
+                    val r = Updater.check()
+                    if (r.update != null) update = r.update
+                    else Toast.makeText(context, r.message, Toast.LENGTH_LONG).show()
+                }
+            },
+            onBack = { screen = Screen.DEVICES }
+        )
     }
 
     val ap = askPin
@@ -200,7 +245,7 @@ fun App(prefs: SharedPreferences) {
         )
     }
 
-    if (showKeyboard) KeyboardSheet(controller) { showKeyboard = false }
+    if (showKeyboard) KeyboardSheet(controller, settings.clearAfterSend) { showKeyboard = false }
 
     if (showHelp) {
         AlertDialog(
@@ -213,29 +258,11 @@ fun App(prefs: SharedPreferences) {
                         "Accesibilidad y anota el PIN.\n\n" +
                         "En este teléfono: espera a que aparezca en la lista, tócalo y escribe el PIN. " +
                         "Si no aparece, agrégalo por su IP.\n\n" +
+                        "Menú ⋮ de cada dispositivo: favoritos y conexión automática.\n\n" +
                         "Si el servicio no se deja activar, permite los ajustes restringidos en la info de la app."
                 )
             },
             confirmButton = { TextButton(onClick = { showHelp = false }) { Text("Entendido") } }
-        )
-    }
-
-    if (showSettings) {
-        AlertDialog(
-            onDismissRequest = { showSettings = false },
-            title = { Text("Ajustes") },
-            text = { Text("Versión instalada: ${BuildConfig.VERSION_NAME}") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showSettings = false
-                    scope.launch {
-                        val r = Updater.check()
-                        if (r.update != null) update = r.update
-                        else Toast.makeText(context, r.message, Toast.LENGTH_LONG).show()
-                    }
-                }) { Text("Buscar actualización") }
-            },
-            dismissButton = { TextButton(onClick = { showSettings = false }) { Text("Cerrar") } }
         )
     }
 

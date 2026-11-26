@@ -32,13 +32,13 @@ import kotlinx.coroutines.delay
 /** Teclado: campo de texto + enviar, y fila de teclas especiales (espacio, flechas, borrar, intro). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun KeyboardSheet(controller: RemoteController, onDismiss: () -> Unit) {
+fun KeyboardSheet(controller: RemoteController, clearAfterSend: Boolean, onDismiss: () -> Unit) {
     var text by remember { mutableStateOf("") }
     val focus = remember { FocusRequester() }
     val send = {
         if (text.isNotEmpty()) {
             controller.sendText(text)
-            text = ""
+            if (clearAfterSend) text = ""
         }
     }
 

@@ -5,15 +5,24 @@ Controla otro teléfono Android desde el tuyo **por wifi**. La misma app va en l
 - **Teléfono que controla:** la lista "Dispositivos" encuentra solo al otro teléfono en la wifi (o se agrega por IP),
   pide el PIN la primera vez y abre el control.
 
-## Qué controla
-La cruceta y OK funcionan como un control de TV (mueven el foco en las apps). En Android 13 o superior en el teléfono
-controlado usan las teclas de dirección reales del sistema; en versiones anteriores se mueve el foco por accesibilidad.
-El ícono ⋯ abre "Más botones", el teclado numérico y el teclado de texto con flechas, espacio, borrar e intro,
-y el ícono del mouse abre el panel táctil con franja de desplazamiento.
+## Pantallas
+- **Dispositivos:** favoritos y teléfonos que tienen la app en tu wifi (solo esos). Menú ⋮ de cada uno: conectar,
+  favoritos, conexión automática (la etiqueta "Auto" solo sale en el que actives) y olvidar.
+- **Control:** se adapta al tamaño de la ventana (también en modo ventana). El ícono del mouse cambia la cruceta por el
+  panel táctil, en el mismo lugar. Teclado de texto con espacio, flechas, borrar e intro, teclado numérico y "Más botones".
+- **Ajustes:** modo de navegación por defecto, botones de volumen del teléfono, velocidad del puntero y del desplazamiento,
+  invertir desplazamiento, borrar el campo después de enviar, versión y buscar actualización.
 
-Inicio, atrás, recientes, notificaciones, bloquear pantalla, volumen y mute, reproducir/pausar/adelantar/retroceder,
-brillo (con permiso), escribir texto y números, cursor táctil (mover, clic, mantener pulsado, desplazar) y las flechas
-(que deslizan la pantalla). El botón OK hace clic donde está el cursor.
+## Qué controla
+Inicio, atrás, recientes, notificaciones, volumen y mute, reproducir/pausar/adelantar/retroceder, captura de pantalla,
+brillo (con permiso), escribir texto y números.
+- **Encendido:** un solo botón; si la pantalla está encendida la apaga y si está apagada la enciende.
+- **Cruceta y OK:** en Android 13 o superior usan las teclas de dirección reales del sistema. En Android 12 o menor se
+  dibuja un recuadro sobre el elemento seleccionado, las flechas lo mueven al elemento más cercano en esa dirección
+  (y desplazan la lista al llegar al borde) y OK lo pulsa; si no se puede, toca en su centro.
+- **Panel táctil:** cursor en forma de flecha de ratón. Un toque = clic; deslizar = mover; mantener el dedo quieto y deslizar =
+  apretar y deslizar (arrastrar). Botones de abajo: izquierdo (mantenerlo apretado y deslizar en el panel = arrastrar),
+  central (clic) y derecho (mantener presionado = abrir las opciones, como al presionar la pantalla).
 
 ## Requisitos
 - Android 9 o superior, ambos teléfonos en la misma wifi.

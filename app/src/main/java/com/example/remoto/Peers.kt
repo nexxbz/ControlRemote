@@ -7,7 +7,14 @@ import android.os.Handler
 import android.os.Looper
 import java.net.Inet4Address
 
-data class Peer(val name: String, val host: String, val port: Int, val pin: String?)
+data class Peer(
+    val name: String,
+    val host: String,
+    val port: Int,
+    val pin: String?,
+    val fav: Boolean = false,
+    val auto: Boolean = false
+)
 
 /** Guarda los teléfonos a los que ya te conectaste (con su PIN). */
 class PeerStore(context: Context) {
@@ -17,12 +24,14 @@ class PeerStore(context: Context) {
         (prefs.getString("lista", "") ?: "").lines().mapNotNull { line ->
             val p = line.split("\t")
             val port = p.getOrNull(2)?.toIntOrNull()
-            if (p.size >= 3 && port != null) Peer(p[0], p[1], port, p.getOrNull(3)?.ifBlank { null }) else null
+            if (p.size >= 3 && port != null) {
+                Peer(p[0], p[1], port, p.getOrNull(3)?.ifBlank { null }, p.getOrNull(4) == "1", p.getOrNull(5) == "1")
+            } else null
         }
 
     fun save(list: List<Peer>) {
         prefs.edit()
-            .putString("lista", list.joinToString("\n") { "${it.name}\t${it.host}\t${it.port}\t${it.pin ?: ""}" })
+            .putString("lista", list.joinToString("\n") { "${it.name}\t${it.host}\t${it.port}\t${it.pin ?: ""}\t${if (it.fav) "1" else "0"}\t${if (it.auto) "1" else "0"}" })
             .apply()
     }
 }
@@ -31,7 +40,10 @@ class PeerStore(context: Context) {
 fun mergePeers(saved: List<Peer>, found: List<Peer>): List<Peer> {
     val map = LinkedHashMap<String, Peer>()
     saved.forEach { map[it.name] = it }
-    found.forEach { f -> map[f.name] = Peer(f.name, f.host, f.port, map[f.name]?.pin) }
+    found.forEach { f ->
+        val old = map[f.name]
+        map[f.name] = Peer(f.name, f.host, f.port, old?.pin, old?.fav ?: false, old?.auto ?: false)
+    }
     return map.values.toList()
 }
 

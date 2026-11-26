@@ -41,106 +41,123 @@ interface RemoteController {
     fun moveMouse(dx: Int, dy: Int)
     fun click(right: Boolean)
     fun scroll(amount: Int)
+    fun drag(start: Boolean)
 }
 
 internal val Bg = Color(0xFF000000)
 internal val Btn = Color(0xFF0F1014)
 internal val Ico = Color(0xFFE4E4EA)
 
+/**
+ * Control remoto. Se adapta al tamaño de la ventana: en pantalla completa usa la cruceta grande y,
+ * si la ventana es pequeña (modo ventana), encoge botones y cruceta para que todo quepa.
+ */
 @Composable
 fun RemoteScreen(
     deviceName: String,
     status: String,
     controller: RemoteController,
-    onMouse: () -> Unit,
+    settings: AppSettings,
     onKeyboard: () -> Unit,
     onDevices: () -> Unit,
     onDisconnect: () -> Unit
 ) {
+    var touchpad by remember { mutableStateOf(settings.touchpadDefault) }
     var showNumbers by remember { mutableStateOf(false) }
     var showMore by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
 
-    Column(
-        Modifier.fillMaxSize().background(Bg).statusBarsPadding().navigationBarsPadding()
-            .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Encabezado: nombre + mouse, teclado, menú
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(deviceName, color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                if (status.isNotEmpty()) Text(status, color = Color.Gray, fontSize = 12.sp)
-            }
-            IconButton(onClick = onMouse) { Icon(Icons.Filled.Mouse, null, tint = Ico, modifier = Modifier.size(32.dp)) }
-            IconButton(onClick = onKeyboard) { Icon(Icons.Filled.Keyboard, null, tint = Ico, modifier = Modifier.size(32.dp)) }
-            Box {
-                IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, null, tint = Ico, modifier = Modifier.size(32.dp)) }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("Dispositivos") }, onClick = { menu = false; onDevices() })
-                    DropdownMenuItem(text = { Text("Desconectar") }, onClick = { menu = false; onDisconnect() })
-                }
-            }
+    BoxWithConstraints(Modifier.fillMaxSize().background(Bg).statusBarsPadding().navigationBarsPadding()) {
+        val gap = 12f
+        val w = (maxWidth.value - 32f).coerceAtLeast(120f)
+        val headerH = if (status.isNotEmpty()) 74f else 56f
+        val availH = maxHeight.value - headerH - gap
+        val cellFull = (w - gap * 3f) / 4f
+
+        // Se encogen los botones hasta que la cruceta tenga un tamaño razonable
+        var k = 1f
+        var cell = cellFull
+        var pad = availH - 4f * cell - 4f * gap
+        while (k > 0.4f && pad < 2.6f * cell) {
+            k -= 0.05f
+            cell = cellFull * k
+            pad = availH - 4f * cell - 4f * gap
         }
+        val rowW = 4f * cell + 3f * gap
+        pad = pad.coerceIn(90f, rowW)
 
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            val gap = 12.dp
-            val cell = (maxWidth - gap * 3) / 4
+        val c = cell.dp
+        val g = gap.dp
 
-            Column(verticalArrangement = Arrangement.spacedBy(gap)) {
-                // Reproducción
-                Row(
-                    Modifier.fillMaxWidth().height(cell).clip(RoundedCornerShape(50)).background(Btn),
-                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconKey(Icons.Filled.FastRewind) { controller.send(Key.REWIND) }
-                    IconKey(Icons.Filled.PlayArrow) { controller.send(Key.PLAY) }
-                    IconKey(Icons.Filled.Pause) { controller.send(Key.PAUSE) }
-                    IconKey(Icons.Filled.FastForward) { controller.send(Key.FORWARD) }
-                }
-
-                // Volumen | mute, números | CC, más | brillo
-                Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
-                    Pill(cell, cell * 2 + gap, Icons.Filled.VolumeUp, Icons.Filled.VolumeDown,
-                        { controller.send(Key.VOL_UP) }, { controller.send(Key.VOL_DOWN) })
-                    Column(verticalArrangement = Arrangement.spacedBy(gap)) {
-                        Round(cell, Icons.Filled.VolumeOff) { controller.send(Key.MUTE) }
-                        Round(cell, Icons.Filled.Dialpad) { showNumbers = true }
-                    }
-                    Column(verticalArrangement = Arrangement.spacedBy(gap)) {
-                        Round(cell, Icons.Filled.ClosedCaption) { controller.send(Key.CAPTIONS) }
-                        Round(cell, Icons.Filled.MoreHoriz) { showMore = true }
-                    }
-                    Pill(cell, cell * 2 + gap, Icons.Filled.BrightnessHigh, Icons.Filled.BrightnessLow,
-                        { controller.send(Key.BRIGHT_UP) }, { controller.send(Key.BRIGHT_DOWN) })
-                }
-
-                // Atrás, inicio, menú, encendido
-                Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
-                    Round(cell, Icons.AutoMirrored.Filled.ArrowBack) { controller.send(Key.BACK) }
-                    Round(cell, Icons.Filled.Home) { controller.send(Key.HOME) }
-                    Round(cell, Icons.AutoMirrored.Filled.List) { controller.send(Key.MENU) }
-                    Round(cell, Icons.Filled.PowerSettingsNew) { controller.send(Key.POWER) }
-                }
-
-                // Cruceta
-                Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(CircleShape).background(Btn)) {
-                    Icon(Icons.Filled.KeyboardArrowUp, null, tint = Ico,
-                        modifier = Modifier.align(Alignment.TopCenter).padding(28.dp).size(64.dp).clickable { controller.send(Key.UP) })
-                    Icon(Icons.Filled.KeyboardArrowDown, null, tint = Ico,
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(28.dp).size(64.dp).clickable { controller.send(Key.DOWN) })
-                    Icon(Icons.Filled.KeyboardArrowLeft, null, tint = Ico,
-                        modifier = Modifier.align(Alignment.CenterStart).padding(28.dp).size(64.dp).clickable { controller.send(Key.LEFT) })
-                    Icon(Icons.Filled.KeyboardArrowRight, null, tint = Ico,
-                        modifier = Modifier.align(Alignment.CenterEnd).padding(28.dp).size(64.dp).clickable { controller.send(Key.RIGHT) })
-                    Box(
-                        Modifier.align(Alignment.Center).fillMaxWidth(0.28f).aspectRatio(1f).clip(CircleShape)
-                            .background(Ico).padding(8.dp).clip(CircleShape).background(Btn)
-                            .clickable { controller.send(Key.OK) }
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(g)
+        ) {
+            // Encabezado: nombre + mouse/cruceta, teclado, menú
+            Row(Modifier.fillMaxWidth().height(headerH.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        deviceName, color = Color.White,
+                        fontSize = if (w < 300f) 22.sp else 30.sp, fontWeight = FontWeight.Bold, maxLines = 1
                     )
+                    if (status.isNotEmpty()) Text(status, color = Color.Gray, fontSize = 11.sp, maxLines = 2)
                 }
-                Spacer(Modifier.height(8.dp))
+                IconButton(onClick = { touchpad = !touchpad }) {
+                    Icon(if (touchpad) Icons.Filled.OpenWith else Icons.Filled.Mouse, null, tint = Ico, modifier = Modifier.size(28.dp))
+                }
+                IconButton(onClick = onKeyboard) { Icon(Icons.Filled.Keyboard, null, tint = Ico, modifier = Modifier.size(28.dp)) }
+                Box {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, null, tint = Ico, modifier = Modifier.size(28.dp)) }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Dispositivos") }, onClick = { menu = false; onDevices() })
+                        DropdownMenuItem(text = { Text("Desconectar") }, onClick = { menu = false; onDisconnect() })
+                    }
+                }
             }
+
+            // Reproducción
+            Row(
+                Modifier.width(rowW.dp).height(c).clip(RoundedCornerShape(50)).background(Btn),
+                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconKey(Icons.Filled.FastRewind, c) { controller.send(Key.REWIND) }
+                IconKey(Icons.Filled.PlayArrow, c) { controller.send(Key.PLAY) }
+                IconKey(Icons.Filled.Pause, c) { controller.send(Key.PAUSE) }
+                IconKey(Icons.Filled.FastForward, c) { controller.send(Key.FORWARD) }
+            }
+
+            // Volumen | mute, números | CC, más | brillo
+            Row(horizontalArrangement = Arrangement.spacedBy(g)) {
+                Pill(c, c * 2 + g, Icons.Filled.VolumeUp, Icons.Filled.VolumeDown,
+                    { controller.send(Key.VOL_UP) }, { controller.send(Key.VOL_DOWN) })
+                Column(verticalArrangement = Arrangement.spacedBy(g)) {
+                    Round(c, Icons.Filled.VolumeOff) { controller.send(Key.MUTE) }
+                    Round(c, Icons.Filled.Dialpad) { showNumbers = true }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(g)) {
+                    Round(c, Icons.Filled.ClosedCaption) { controller.send(Key.CAPTIONS) }
+                    Round(c, Icons.Filled.MoreHoriz) { showMore = true }
+                }
+                Pill(c, c * 2 + g, Icons.Filled.BrightnessHigh, Icons.Filled.BrightnessLow,
+                    { controller.send(Key.BRIGHT_UP) }, { controller.send(Key.BRIGHT_DOWN) })
+            }
+
+            // Atrás, inicio, menú, encendido/apagado
+            Row(horizontalArrangement = Arrangement.spacedBy(g)) {
+                Round(c, Icons.AutoMirrored.Filled.ArrowBack) { controller.send(Key.BACK) }
+                Round(c, Icons.Filled.Home) { controller.send(Key.HOME) }
+                Round(c, Icons.AutoMirrored.Filled.List) { controller.send(Key.MENU) }
+                Round(c, Icons.Filled.PowerSettingsNew) { controller.send(Key.POWER) }
+            }
+
+            // Cruceta o panel táctil (en el mismo lugar)
+            if (touchpad) {
+                TouchpadArea(controller, settings, Modifier.width(rowW.dp).height(pad.dp))
+            } else {
+                DPad(pad.dp, controller)
+            }
+            Spacer(Modifier.height(4.dp))
         }
     }
 
@@ -149,8 +166,31 @@ fun RemoteScreen(
 }
 
 @Composable
-private fun IconKey(icon: ImageVector, onClick: () -> Unit) =
-    Icon(icon, null, tint = Ico, modifier = Modifier.size(44.dp).clickable { onClick() })
+private fun DPad(size: Dp, controller: RemoteController) {
+    Box(Modifier.size(size).clip(CircleShape).background(Btn)) {
+        ArrowBtn(Modifier.align(Alignment.TopCenter).padding(top = size * 0.05f), size, Icons.Filled.KeyboardArrowUp) { controller.send(Key.UP) }
+        ArrowBtn(Modifier.align(Alignment.BottomCenter).padding(bottom = size * 0.05f), size, Icons.Filled.KeyboardArrowDown) { controller.send(Key.DOWN) }
+        ArrowBtn(Modifier.align(Alignment.CenterStart).padding(start = size * 0.05f), size, Icons.Filled.KeyboardArrowLeft) { controller.send(Key.LEFT) }
+        ArrowBtn(Modifier.align(Alignment.CenterEnd).padding(end = size * 0.05f), size, Icons.Filled.KeyboardArrowRight) { controller.send(Key.RIGHT) }
+        Box(
+            Modifier.align(Alignment.Center).size(size * 0.3f).clip(CircleShape)
+                .background(Ico).padding(size * 0.025f).clip(CircleShape).background(Btn)
+                .clickable { controller.send(Key.OK) }
+        )
+    }
+}
+
+@Composable
+private fun ArrowBtn(modifier: Modifier, size: Dp, icon: ImageVector, onClick: () -> Unit) {
+    Box(
+        modifier.size(size * 0.28f).clip(CircleShape).clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) { Icon(icon, null, tint = Ico, modifier = Modifier.size(size * 0.22f)) }
+}
+
+@Composable
+private fun IconKey(icon: ImageVector, cell: Dp, onClick: () -> Unit) =
+    Icon(icon, null, tint = Ico, modifier = Modifier.size(cell * 0.5f).clickable { onClick() })
 
 @Composable
 private fun Round(size: Dp, icon: ImageVector, onClick: () -> Unit) =

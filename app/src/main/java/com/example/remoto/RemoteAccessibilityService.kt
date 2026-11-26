@@ -7,6 +7,8 @@ import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.PixelFormat
 import android.media.AudioManager
 import android.net.nsd.NsdManager
@@ -29,6 +31,7 @@ import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
+import kotlin.math.abs
 
 /** PIN de 6 dígitos que protege este teléfono; el otro teléfono debe escribirlo para controlarlo. */
 object ReceiverPin {
@@ -67,6 +70,11 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var cx = 0f
     private var cy = 0f
     private var cursorActive = false
+    private var ring: RingView? = null
+    private var ringLp: WindowManager.LayoutParams? = null
+    private var ringBounds: Rect? = null
+    private val hideRing = Runnable { ring?.visibility = View.GONE }
+    private class Cand(val node: AccessibilityNodeInfo, val rect: Rect)
     private val hideCursor = Runnable {
         cursor?.visibility = View.GONE
         cursorActive = false
@@ -110,7 +118,10 @@ class RemoteAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
         }
         regListener = null
-        main.post { removeCursor() }
+        main.post {
+            removeCursor()
+            removeRing()
+        }
     }
 
     // ---------- Red ----------
@@ -196,6 +207,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
             "C" -> clickAtCursor(arg == "R")
             "S" -> scrollAtCursor(arg.toIntOrNull() ?: 0)
+            "D" -> if (arg == "1") dragStart() else dragEnd()
         }
     }
 
@@ -266,63 +278,194 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
             if (performGlobalAction(action)) return
         }
-        dpadFallback(dir)
+        if (dir == 4) okPress() else moveVirtual(dir, true)
     }
 
-    /** Cruceta por accesibilidad (Android 12 o menor): mueve el foco, nunca toca la pantalla. */
-    private fun dpadFallback(dir: Int) {
+    // ---------- Cruceta por pantalla (Android 12 o menor, o si el sistema no la ejecuta) ----------
+    // Se dibuja un recuadro sobre el elemento seleccionado; las flechas lo mueven al elemento más cercano
+    // en esa dirección y OK lo pulsa. Funciona aunque la app no soporte navegación con teclado.
+
+    private fun collect(node: AccessibilityNodeInfo?, out: MutableList<Cand>, depth: Int) {
+        if (node == null || depth > 40 || out.size > 500) return
+        if (!node.isVisibleToUser) return
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        if ((node.isClickable || node.isFocusable) && node.isEnabled && r.width() > 8 && r.height() > 8) {
+            out.add(Cand(node, r))
+        }
+        for (i in 0 until node.childCount) collect(node.getChild(i), out, depth + 1)
+    }
+
+    private fun moveVirtual(dir: Int, retry: Boolean) {
         val root = rootInActiveWindow ?: return
-        val current = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?: root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+        val all = ArrayList<Cand>()
+        collect(root, all, 0)
+        val m = resources.displayMetrics
+        val screenArea = m.widthPixels.toFloat() * m.heightPixels
+        var list: List<Cand> = all.filter { it.rect.width().toFloat() * it.rect.height() < screenArea * 0.7f }
+        val focusables = list.filter { it.node.isFocusable }
+        if (focusables.size >= 2) list = focusables
+        if (list.isEmpty()) return
 
-        if (dir == 4) {
-            // OK: pulsar el elemento enfocado (o el cursor si se acaba de usar el panel táctil)
-            var n = current
-            while (n != null) {
-                if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
-                n = n.parent
+        var cur: Rect? = ringBounds?.let { r -> list.firstOrNull { it.rect == r }?.rect }
+        if (cur == null) {
+            val f = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (f != null) {
+                val fr = Rect()
+                f.getBoundsInScreen(fr)
+                if (list.any { it.rect == fr }) cur = fr
             }
-            if (cursorActive) clickAtCursor(false)
+        }
+        if (cur == null) {
+            // Primera pulsación: se marca el elemento más arriba y a la izquierda
+            val first = list.minWithOrNull(compareBy<Cand>({ it.rect.top / 40 }, { it.rect.left }))
+            if (first != null) showRing(first.rect)
             return
         }
 
-        // Sin foco todavía: la primera flecha enfoca el primer elemento, como en un control de TV
-        if (current == null) {
-            firstFocusable(root)?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val cx = cur.exactCenterX()
+        val cy = cur.exactCenterY()
+        var best: Cand? = null
+        var bestScore = Float.MAX_VALUE
+        for (c in list) {
+            if (c.rect == cur) continue
+            val dx = c.rect.exactCenterX() - cx
+            val dy = c.rect.exactCenterY() - cy
+            val primary = when (dir) {
+                0 -> -dy
+                1 -> dy
+                2 -> -dx
+                else -> dx
+            }
+            if (primary <= 4f) continue
+            val perp = if (dir < 2) abs(dx) else abs(dy)
+            val score = primary + 2f * perp
+            if (score < bestScore) {
+                bestScore = score
+                best = c
+            }
+        }
+        val target = best
+        if (target != null) {
+            showRing(target.rect)
             return
         }
-
-        val direction = when (dir) {
-            0 -> View.FOCUS_UP
-            1 -> View.FOCUS_DOWN
-            2 -> View.FOCUS_LEFT
-            else -> View.FOCUS_RIGHT
+        // No hay más elementos en esa dirección: se desplaza la lista y se vuelve a intentar una vez
+        if (retry && scrollForDirection(root, cur, dir)) {
+            main.postDelayed({ moveVirtual(dir, false) }, 450)
         }
-        val next = current.focusSearch(direction)
-        if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+    }
 
-        // No hay más elementos en esa dirección: desplazar la lista si se puede
-        val scroll = when (dir) {
+    private fun scrollForDirection(root: AccessibilityNodeInfo, cur: Rect, dir: Int): Boolean {
+        val action = when (dir) {
             0 -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
             1 -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
             2 -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
             else -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
         }
-        var n: AccessibilityNodeInfo? = current
-        while (n != null) {
-            if (n.isScrollable && n.performAction(scroll)) return
-            n = n.parent
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = Long.MAX_VALUE
+        fun walk(n: AccessibilityNodeInfo?, depth: Int) {
+            if (n == null || depth > 40) return
+            if (n.isVisibleToUser && n.isScrollable) {
+                val r = Rect()
+                n.getBoundsInScreen(r)
+                if (r.contains(cur.centerX(), cur.centerY())) {
+                    val area = r.width().toLong() * r.height()
+                    if (area < bestArea) {
+                        bestArea = area
+                        best = n
+                    }
+                }
+            }
+            for (i in 0 until n.childCount) walk(n.getChild(i), depth + 1)
         }
+        walk(root, 0)
+        return best?.performAction(action) ?: false
     }
 
-    private fun firstFocusable(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        if (node == null) return null
-        if (node.isFocusable && node.isVisibleToUser && node.isEnabled && node.childCount == 0) return node
-        for (i in 0 until node.childCount) {
-            val found = firstFocusable(node.getChild(i))
-            if (found != null) return found
+    /** OK: pulsa el elemento marcado; si no se puede, toca en su centro. */
+    private fun okPress() {
+        val r = ringBounds
+        if (r != null && ring?.visibility == View.VISIBLE) {
+            val root = rootInActiveWindow
+            if (root != null) {
+                val all = ArrayList<Cand>()
+                collect(root, all, 0)
+                val match = all.firstOrNull { it.rect == r }
+                var n: AccessibilityNodeInfo? = match?.node
+                while (n != null) {
+                    if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+                    n = n.parent
+                }
+            }
+            val path = Path()
+            path.moveTo(r.exactCenterX(), r.exactCenterY())
+            gesture(path, 60)
+            return
         }
-        return null
+        // Sin recuadro: se pulsa el elemento con foco, o el cursor si se acaba de usar el panel táctil
+        val root = rootInActiveWindow
+        var n: AccessibilityNodeInfo? = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: root?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
+        while (n != null) {
+            if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+            n = n.parent
+        }
+        if (cursorActive) clickAtCursor(false)
+    }
+
+    private fun showRing(r: Rect) {
+        ringBounds = r
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val existing = ring
+        val lp = ringLp
+        if (existing == null || lp == null) {
+            val view = RingView(this)
+            val params = WindowManager.LayoutParams(
+                r.width(), r.height(),
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            )
+            params.gravity = Gravity.TOP or Gravity.START
+            params.x = r.left
+            params.y = r.top
+            try {
+                wm.addView(view, params)
+                ring = view
+                ringLp = params
+            } catch (e: Exception) {
+                return
+            }
+        } else {
+            lp.width = r.width()
+            lp.height = r.height()
+            lp.x = r.left
+            lp.y = r.top
+            try {
+                wm.updateViewLayout(existing, lp)
+            } catch (e: Exception) {
+            }
+        }
+        ring?.visibility = View.VISIBLE
+        ring?.invalidate()
+        main.removeCallbacks(hideRing)
+        main.postDelayed(hideRing, 10000)
+    }
+
+    private fun removeRing() {
+        val view = ring ?: return
+        try {
+            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(view)
+        } catch (e: Exception) {
+        }
+        ring = null
+        ringLp = null
+        ringBounds = null
     }
 
     // ---------- Encender / apagar ----------
@@ -422,6 +565,90 @@ class RemoteAccessibilityService : AccessibilityService() {
         cx = (cx + dx).coerceIn(0f, m.widthPixels.toFloat())
         cy = (cy + dy).coerceIn(0f, m.heightPixels.toFloat())
         showCursor()
+        if (dragStroke != null) dragPump()
+    }
+
+    // ---------- Apretar y deslizar (arrastrar) ----------
+    // Se mantiene el dedo "apretado" en el cursor con un gesto continuo y se va moviendo con el panel táctil.
+
+    private var dragStroke: GestureDescription.StrokeDescription? = null
+    private var dragBusy = false
+    private var dragEndRequested = false
+    private var dragLastX = 0f
+    private var dragLastY = 0f
+
+    private fun dragStart() {
+        if (dragStroke != null) return
+        dragLastX = cx
+        dragLastY = cy
+        dragEndRequested = false
+        val path = Path()
+        path.moveTo(cx, cy)
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 1L, true)
+        dragStroke = stroke
+        dragBusy = true
+        val ok = dispatchGesture(
+            GestureDescription.Builder().addStroke(stroke).build(),
+            object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    main.post { dragBusy = false; dragPump() }
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    main.post { dragBusy = false; dragStroke = null }
+                }
+            },
+            null
+        )
+        if (!ok) {
+            dragBusy = false
+            dragStroke = null
+        }
+        showCursor()
+    }
+
+    private fun dragEnd() {
+        if (dragStroke == null) return
+        dragEndRequested = true
+        dragPump()
+    }
+
+    private fun dragPump() {
+        val stroke = dragStroke ?: return
+        if (dragBusy) return
+        val end = dragEndRequested
+        if (!end && cx == dragLastX && cy == dragLastY) return
+        val path = Path()
+        path.moveTo(dragLastX, dragLastY)
+        path.lineTo(cx, cy)
+        val next = stroke.continueStroke(path, 0L, 20L, !end)
+        dragLastX = cx
+        dragLastY = cy
+        if (end) {
+            dragStroke = null
+            dragEndRequested = false
+        } else {
+            dragStroke = next
+        }
+        dragBusy = true
+        val ok = dispatchGesture(
+            GestureDescription.Builder().addStroke(next).build(),
+            object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    main.post { dragBusy = false; dragPump() }
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    main.post { dragBusy = false; dragStroke = null; dragEndRequested = false }
+                }
+            },
+            null
+        )
+        if (!ok) {
+            dragBusy = false
+            dragStroke = null
+            dragEndRequested = false
+        }
     }
 
     private fun clickAtCursor(hold: Boolean) {
@@ -434,7 +661,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private fun scrollAtCursor(amount: Int) {
         if (amount == 0) return
         val m = resources.displayMetrics
-        val dist = if (amount > 0) 450f else -450f
+        val dist = 150f * amount
         val y2 = (cy + dist).coerceIn(0f, m.heightPixels.toFloat())
         val path = Path()
         path.moveTo(cx, cy)
@@ -445,18 +672,21 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     private fun showCursor() {
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val size = (28 * resources.displayMetrics.density).toInt()
-        val x = (cx - size / 2f).toInt()
-        val y = (cy - size / 2f).toInt()
+        val density = resources.displayMetrics.density
+        val curW = (22 * density).toInt()
+        val curH = (34 * density).toInt()
+        val x = cx.toInt()
+        val y = cy.toInt()
         val existing = cursor
         val lp = cursorLp
         if (existing == null || lp == null) {
             val view = CursorView(this)
             val params = WindowManager.LayoutParams(
-                size, size,
+                curW, curH,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT
             )
@@ -495,21 +725,57 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 }
 
-/** Círculo que marca dónde está el cursor en el teléfono controlado. */
+/** Flecha de ratón: la punta (arriba a la izquierda) marca dónde está el cursor. */
 class CursorView(context: Context) : View(context) {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x99000000.toInt()
+        color = 0xFFFFFFFF.toInt()
         style = Paint.Style.FILL
+    }
+    private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF000000.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        strokeJoin = Paint.Join.ROUND
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val p = Path()
+        p.moveTo(2f, 2f)
+        p.lineTo(2f, h * 0.82f)
+        p.lineTo(w * 0.27f, h * 0.64f)
+        p.lineTo(w * 0.45f, h * 0.97f)
+        p.lineTo(w * 0.62f, h * 0.89f)
+        p.lineTo(w * 0.45f, h * 0.57f)
+        p.lineTo(w * 0.82f, h * 0.57f)
+        p.close()
+        canvas.drawPath(p, fill)
+        canvas.drawPath(p, edge)
+    }
+}
+
+/** Recuadro que marca el elemento seleccionado con la cruceta. */
+class RingView(context: Context) : View(context) {
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x22FFFFFF
+        style = Paint.Style.FILL
+    }
+    private val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF1E88E5.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = 12f
     }
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt()
         style = Paint.Style.STROKE
-        strokeWidth = 5f
+        strokeWidth = 6f
     }
 
     override fun onDraw(canvas: Canvas) {
-        val r = width / 2f - 4f
-        canvas.drawCircle(width / 2f, height / 2f, r, fill)
-        canvas.drawCircle(width / 2f, height / 2f, r, stroke)
+        val rect = RectF(6f, 6f, width - 6f, height - 6f)
+        canvas.drawRoundRect(rect, 16f, 16f, fill)
+        canvas.drawRoundRect(rect, 16f, 16f, outline)
+        canvas.drawRoundRect(rect, 16f, 16f, stroke)
     }
 }

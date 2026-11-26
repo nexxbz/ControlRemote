@@ -170,4 +170,5 @@ class WifiController : RemoteController {
     override fun moveMouse(dx: Int, dy: Int) = sendLine("M:$dx,$dy")
     override fun click(right: Boolean) = sendLine(if (right) "C:R" else "C:L")
     override fun scroll(amount: Int) = sendLine("S:$amount")
+    override fun drag(start: Boolean) = sendLine(if (start) "D:1" else "D:0")
 }
