@@ -225,8 +225,8 @@ class RemoteAccessibilityService : AccessibilityService() {
             "PAUSE" -> media(KeyEvent.KEYCODE_MEDIA_PAUSE)
             "REWIND" -> media(KeyEvent.KEYCODE_MEDIA_REWIND)
             "FORWARD" -> media(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
-            "BRIGHT_UP" -> brightness(25)
-            "BRIGHT_DOWN" -> brightness(-25)
+            "BRIGHT_UP" -> brightness(1)
+            "BRIGHT_DOWN" -> brightness(-1)
             "OK" -> dpad(4)
             "UP" -> dpad(0)
             "DOWN" -> dpad(1)
@@ -254,12 +254,26 @@ class RemoteAccessibilityService : AccessibilityService() {
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
     }
 
-    private fun brightness(delta: Int) {
+    /** Máximo de la escala de brillo de este teléfono (muchos usan 1023, 2047 o 4095 en vez de 255). */
+    private fun brightnessMax(): Int {
+        return try {
+            val res = android.content.res.Resources.getSystem()
+            val id = res.getIdentifier("config_screenBrightnessSettingMaximum", "integer", "android")
+            if (id != 0) res.getInteger(id).coerceAtLeast(255) else 255
+        } catch (e: Exception) {
+            255
+        }
+    }
+
+    /** direction: +1 sube, -1 baja. Cada paso es el 10 % de la escala, así se llega desde 0 hasta el 100 %. */
+    private fun brightness(direction: Int) {
         if (!Settings.System.canWrite(this)) return
         val cr = contentResolver
-        val current = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, 128)
+        val max = brightnessMax()
+        val current = Settings.System.getInt(cr, Settings.System.SCREEN_BRIGHTNESS, max / 2)
+        val step = (max * 0.1f).toInt().coerceAtLeast(1)
         Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
-        Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, (current + delta).coerceIn(1, 255))
+        Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, (current + direction * step).coerceIn(1, max))
     }
 
     /**
@@ -708,7 +722,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         if (existing == null || lp == null) {
             val view = CursorView(this)
             val params = WindowManager.LayoutParams(
-                curW, curH,
+                view.prefW, view.prefH,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -737,7 +751,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         cursor?.visibility = View.VISIBLE
         cursorActive = true
         main.removeCallbacks(hideCursor)
-        main.postDelayed(hideCursor, 4000)
+        main.postDelayed(hideCursor, 8000)
     }
 
     private fun removeCursor() {
@@ -751,8 +765,28 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 }
 
-/** Flecha de ratón: la punta (arriba a la izquierda) marca dónde está el cursor. */
+/** Carga la imagen del puntero de ratón del propio sistema (si el teléfono la deja leer). */
+private fun loadSystemPointer(): android.graphics.drawable.Drawable? {
+    val res = android.content.res.Resources.getSystem()
+    for (name in listOf("pointer_arrow", "pointer_arrow_icon")) {
+        try {
+            val id = res.getIdentifier(name, "drawable", "android")
+            if (id != 0) {
+                val d = res.getDrawable(id, null)
+                if (d != null) return d
+            }
+        } catch (e: Exception) {
+        }
+    }
+    return null
+}
+
+/** Puntero de ratón: usa la imagen original del sistema; si no está disponible dibuja una flecha igual. */
 class CursorView(context: Context) : View(context) {
+    private val system: android.graphics.drawable.Drawable? = loadSystemPointer()
+    val prefW: Int = system?.intrinsicWidth?.takeIf { it > 0 } ?: (22 * context.resources.displayMetrics.density).toInt()
+    val prefH: Int = system?.intrinsicHeight?.takeIf { it > 0 } ?: (34 * context.resources.displayMetrics.density).toInt()
+
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt()
         style = Paint.Style.FILL
@@ -765,6 +799,12 @@ class CursorView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
+        val sys = system
+        if (sys != null) {
+            sys.setBounds(0, 0, width, height)
+            sys.draw(canvas)
+            return
+        }
         val w = width.toFloat()
         val h = height.toFloat()
         val p = Path()
