@@ -23,10 +23,10 @@ class AppSettings(context: Context) {
     var clearAfterSend by mutableStateOf(prefs.getBoolean("clear", true))
         private set
 
-    fun setTouchpadDefault(v: Boolean) { touchpadDefault = v; prefs.edit().putBoolean("touchpad", v).apply() }
-    fun setVolumeKeys(v: Boolean) { volumeKeys = v; prefs.edit().putBoolean("volkeys", v).apply() }
-    fun setPointerSpeed(v: Float) { pointerSpeed = v; prefs.edit().putFloat("ptr", v).apply() }
-    fun setScrollSpeed(v: Float) { scrollSpeed = v; prefs.edit().putFloat("scr", v).apply() }
-    fun setInvertScroll(v: Boolean) { invertScroll = v; prefs.edit().putBoolean("inv", v).apply() }
-    fun setClearAfterSend(v: Boolean) { clearAfterSend = v; prefs.edit().putBoolean("clear", v).apply() }
+    fun updateTouchpadDefault(v: Boolean) { touchpadDefault = v; prefs.edit().putBoolean("touchpad", v).apply() }
+    fun updateVolumeKeys(v: Boolean) { volumeKeys = v; prefs.edit().putBoolean("volkeys", v).apply() }
+    fun updatePointerSpeed(v: Float) { pointerSpeed = v; prefs.edit().putFloat("ptr", v).apply() }
+    fun updateScrollSpeed(v: Float) { scrollSpeed = v; prefs.edit().putFloat("scr", v).apply() }
+    fun updateInvertScroll(v: Boolean) { invertScroll = v; prefs.edit().putBoolean("inv", v).apply() }
+    fun updateClearAfterSend(v: Boolean) { clearAfterSend = v; prefs.edit().putBoolean("clear", v).apply() }
 }

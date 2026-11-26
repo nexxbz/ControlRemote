@@ -34,12 +34,12 @@ fun SettingsScreen(settings: AppSettings, version: String, onCheckUpdate: () -> 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = !settings.touchpadDefault,
-                onClick = { settings.setTouchpadDefault(false) },
+                onClick = { settings.updateTouchpadDefault(false) },
                 label = { Text("Cruceta") }
             )
             FilterChip(
                 selected = settings.touchpadDefault,
-                onClick = { settings.setTouchpadDefault(true) },
+                onClick = { settings.updateTouchpadDefault(true) },
                 label = { Text("Panel táctil") }
             )
         }
@@ -47,20 +47,20 @@ fun SettingsScreen(settings: AppSettings, version: String, onCheckUpdate: () -> 
             "Usar los botones de volumen del teléfono",
             "Suben y bajan el volumen del otro teléfono mientras estás en el control",
             settings.volumeKeys
-        ) { settings.setVolumeKeys(it) }
+        ) { settings.updateVolumeKeys(it) }
 
         Section("Mouse")
         SliderRow("Velocidad del puntero (x${"%.1f".format(settings.pointerSpeed)})", settings.pointerSpeed) {
-            settings.setPointerSpeed(it)
+            settings.updatePointerSpeed(it)
         }
         SliderRow("Velocidad del desplazamiento (x${"%.1f".format(settings.scrollSpeed)})", settings.scrollSpeed) {
-            settings.setScrollSpeed(it)
+            settings.updateScrollSpeed(it)
         }
-        SwitchRow("Invertir la dirección de desplazamiento", null, settings.invertScroll) { settings.setInvertScroll(it) }
+        SwitchRow("Invertir la dirección de desplazamiento", null, settings.invertScroll) { settings.updateInvertScroll(it) }
 
         Section("Teclado y campo de entrada")
         SwitchRow("Borrar el campo de texto después de enviar", null, settings.clearAfterSend) {
-            settings.setClearAfterSend(it)
+            settings.updateClearAfterSend(it)
         }
 
         Section("Acerca de")
