@@ -228,20 +228,28 @@ class RemoteAccessibilityService : AccessibilityService() {
             "FORWARD" -> media(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
             "BRIGHT_UP" -> brightness(1)
             "BRIGHT_DOWN" -> brightness(-1)
-            "OK" -> dpad(4)
-            "UP" -> dpad(0)
-            "DOWN" -> dpad(1)
-            "LEFT" -> dpad(2)
-            "RIGHT" -> dpad(3)
+            "OK" -> if (!sendPcKey(KeyEvent.KEYCODE_ENTER)) dpad(4)
+            "UP" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_UP)) dpad(0)
+            "DOWN" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_DOWN)) dpad(1)
+            "LEFT" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_LEFT)) dpad(2)
+            "RIGHT" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_RIGHT)) dpad(3)
             "STOP" -> media(KeyEvent.KEYCODE_MEDIA_STOP)
             "PREV" -> media(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
             "NEXT" -> media(KeyEvent.KEYCODE_MEDIA_NEXT)
             "SCREENSHOT" -> performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
             "SPACE" -> typeText(" ")
             "BACKSPACE" -> backspace()
-            "ENTER" -> enter()
+            "ENTER" -> if (!sendPcKey(KeyEvent.KEYCODE_ENTER)) enter()
             else -> if (name.length == 2 && name[0] == 'N' && name[1].isDigit()) typeText(name.substring(1))
         }
+    }
+
+    private fun sendPcKey(keyCode: Int): Boolean {
+        if (!RemoteKeyboardService.isSelected(this)) return false
+        val ime = RemoteKeyboardService.instance ?: return false
+        val sent = ime.sendPcKey(keyCode)
+        if (sent) removeRing()
+        return sent
     }
 
     private fun volume(direction: Int) {

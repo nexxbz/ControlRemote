@@ -6,9 +6,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.os.Build
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.KeyEvent
 import android.widget.Toast
@@ -119,12 +122,24 @@ fun App(
 
     LaunchedEffect(screen) { onRemoteVisible(screen == Screen.REMOTE) }
 
-    // Al volver a la app (por ejemplo de Accesibilidad) se actualiza el estado
+    // Al volver a la app (por ejemplo de Accesibilidad o Teclado) se actualiza el estado
     DisposableEffect(Unit) {
         val lifecycle = (context as ComponentActivity).lifecycle
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) tick++ }
-        lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer) }
+        val lifecycleObserver = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) tick++ }
+        lifecycle.addObserver(lifecycleObserver)
+        val settingsObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                tick++
+            }
+        }
+        val cr = context.contentResolver
+        cr.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.DEFAULT_INPUT_METHOD), false, settingsObserver)
+        cr.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.ENABLED_INPUT_METHODS), false, settingsObserver)
+        cr.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES), false, settingsObserver)
+        onDispose {
+            lifecycle.removeObserver(lifecycleObserver)
+            cr.unregisterContentObserver(settingsObserver)
+        }
     }
 
     val ownIp = remember(tick) { localIpv4(context) }
@@ -223,9 +238,13 @@ fun App(
         }
         Screen.RECEIVER -> {
             val enabled = remember(tick) { isServiceEnabled(context) }
+            val imeEnabled = remember(tick) { RemoteKeyboardService.isEnabled(context) }
+            val imeSelected = remember(tick) { RemoteKeyboardService.isSelected(context) }
             val canWrite = remember(tick) { Settings.System.canWrite(context) }
             ReceiverScreen(
                 enabled = enabled,
+                imeEnabled = imeEnabled,
+                imeSelected = imeSelected,
                 pin = pinText,
                 ip = ownIp,
                 canWriteSettings = canWrite,
@@ -235,6 +254,8 @@ fun App(
                         Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
                     )
                 },
+                onOpenImeSettings = { context.startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) },
+                onSelectIme = { RemoteKeyboardService.showPicker(context) },
                 onOpenWriteSettings = {
                     context.startActivity(
                         Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${context.packageName}"))

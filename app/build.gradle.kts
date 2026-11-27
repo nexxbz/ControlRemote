@@ -23,11 +23,16 @@ android {
 
     // Misma firma en todos los builds: así Android acepta instalar la actualización encima.
     signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug.keystore")
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debugConfig")
         }
     }
 
