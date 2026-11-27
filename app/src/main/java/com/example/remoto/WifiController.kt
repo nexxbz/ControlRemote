@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.io.BufferedReader
@@ -51,6 +52,12 @@ class WifiController : RemoteController {
         private set
     var connected by mutableStateOf(false)
         private set
+    var displayCount by mutableIntStateOf(1)
+        private set
+    var activeDisplayIndex by mutableIntStateOf(0)
+        private set
+    var secondaryOverlayBlocked by mutableStateOf(false)
+        private set
 
     private val io = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
@@ -60,6 +67,30 @@ class WifiController : RemoteController {
     private var lastPort = CONTROL_PORT
     private var lastPin = ""
     private var infoText = "Conectado"
+
+    private fun startReader(s: Socket, reader: BufferedReader) {
+        Thread {
+            try {
+                while (!s.isClosed) {
+                    val line = reader.readLine() ?: break
+                    if (line.startsWith("DISPLAYS:")) {
+                        val parts = line.substringAfter("DISPLAYS:").split("|")
+                        val count = (parts.getOrNull(0)?.toIntOrNull() ?: 1).coerceAtLeast(1)
+                        val activeIdx = (parts.getOrNull(1)?.toIntOrNull() ?: 0).coerceIn(0, count - 1)
+                        val blocked = parts.getOrNull(2) == "1"
+                        main.post {
+                            if (socket === s) {
+                                displayCount = count
+                                activeDisplayIndex = activeIdx
+                                secondaryOverlayBlocked = blocked
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }.apply { isDaemon = true; start() }
+    }
 
     /** 0 = conectado, 1 = PIN incorrecto, 2 = no se pudo / rechazado. Se llama desde el hilo de red. */
     private fun handshake(host: String, port: Int, pin: String): Int {
@@ -72,7 +103,8 @@ class WifiController : RemoteController {
             val o = s.getOutputStream()
             o.write("HELLO $pin\n".toByteArray(Charsets.UTF_8))
             o.flush()
-            val reply = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8)).readLine()
+            val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
+            val reply = reader.readLine()
             if (reply != null && reply.startsWith("OK")) {
                 s.soTimeout = 0
                 socket = s
@@ -83,6 +115,7 @@ class WifiController : RemoteController {
                     sdk >= 33 -> "Conectado · Android ${androidVersionName(sdk)}"
                     else -> "Conectado · Android ${androidVersionName(sdk)} (cruceta en modo compatible)"
                 }
+                startReader(s, reader)
                 0
             } else {
                 s.close()
@@ -132,6 +165,11 @@ class WifiController : RemoteController {
         }
         socket = null
         out = null
+        main.post {
+            displayCount = 1
+            activeDisplayIndex = 0
+            secondaryOverlayBlocked = false
+        }
     }
 
     private fun write(line: String): Boolean {
@@ -164,6 +202,9 @@ class WifiController : RemoteController {
             }
         }
     }
+
+    fun selectDisplay(index: Int) = sendLine("DISP:$index")
+    fun hideMouse() = sendLine("M_HIDE:")
 
     override fun send(key: Key) = sendLine("K:${key.name}")
     override fun sendText(text: String) = sendLine("T:" + text.replace("\n", " "))

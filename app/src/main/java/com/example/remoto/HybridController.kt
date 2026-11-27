@@ -13,6 +13,13 @@ class HybridController(private val wifi: WifiController, private val bt: BtHidCo
             wifi.status
         }
 
+    val displayCount: Int get() = wifi.displayCount
+    val activeDisplayIndex: Int get() = wifi.activeDisplayIndex
+    val secondaryOverlayBlocked: Boolean get() = wifi.secondaryOverlayBlocked
+
+    fun selectDisplay(index: Int) = wifi.selectDisplay(index)
+    fun hideMouse() = wifi.hideMouse()
+
     override fun send(key: Key) {
         if (bt.isConnected && bt.supports(key)) bt.send(key) else wifi.send(key)
     }

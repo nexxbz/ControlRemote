@@ -228,6 +228,11 @@ fun App(
                 status = hybrid.statusText,
                 controller = hybrid,
                 settings = settings,
+                displayCount = hybrid.displayCount,
+                activeDisplayIndex = hybrid.activeDisplayIndex,
+                secondaryOverlayBlocked = hybrid.secondaryOverlayBlocked,
+                onSelectDisplay = { hybrid.selectDisplay(it) },
+                onHideMouse = { hybrid.hideMouse() },
                 onKeyboard = { showKeyboard = true },
                 onBluetooth = {
                     showBt = true
@@ -242,6 +247,7 @@ fun App(
             val imeEnabled = remember(tick) { RemoteKeyboardService.isEnabled(context) }
             val imeSelected = remember(tick) { RemoteKeyboardService.isSelected(context) }
             val canWrite = remember(tick) { Settings.System.canWrite(context) }
+            val canOverlay = remember(tick) { Settings.canDrawOverlays(context) }
             ReceiverScreen(
                 enabled = enabled,
                 imeEnabled = imeEnabled,
@@ -249,6 +255,7 @@ fun App(
                 pin = pinText,
                 ip = ownIp,
                 canWriteSettings = canWrite,
+                canDrawOverlays = canOverlay,
                 onOpenAccessibility = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                 onOpenAppInfo = {
                     context.startActivity(
@@ -260,6 +267,11 @@ fun App(
                 onOpenWriteSettings = {
                     context.startActivity(
                         Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${context.packageName}"))
+                    )
+                },
+                onOpenOverlaySettings = {
+                    context.startActivity(
+                        Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
                     )
                 },
                 onNewPin = { pinText = ReceiverPin.renew(context) },

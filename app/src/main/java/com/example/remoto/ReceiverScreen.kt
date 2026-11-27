@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -50,11 +51,13 @@ fun ReceiverScreen(
     pin: String,
     ip: String?,
     canWriteSettings: Boolean,
+    canDrawOverlays: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenAppInfo: () -> Unit,
     onOpenImeSettings: () -> Unit,
     onSelectIme: () -> Unit,
     onOpenWriteSettings: () -> Unit,
+    onOpenOverlaySettings: () -> Unit,
     onNewPin: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -185,6 +188,26 @@ fun ReceiverScreen(
                     text = "Permitir Brillo",
                     tag = "allow_brightness_button",
                     onClick = onOpenWriteSettings
+                )
+            }
+        }
+
+        // 4. Puntero en segunda pantalla (scrcpy --new-display)
+        StatusCard(
+            icon = Icons.Filled.Layers,
+            title = "Puntero en segunda pantalla (scrcpy)",
+            active = canDrawOverlays,
+            description = if (canDrawOverlays) {
+                "Permiso concedido: la flecha del mouse se dibuja también en pantallas virtuales."
+            } else {
+                "Necesario en algunos teléfonos para mostrar la flecha del mouse en scrcpy --new-display."
+            }
+        ) {
+            if (!canDrawOverlays) {
+                AmberOutlinedButton(
+                    text = "Permitir sobre otras apps",
+                    tag = "allow_overlay_button",
+                    onClick = onOpenOverlaySettings
                 )
             }
         }

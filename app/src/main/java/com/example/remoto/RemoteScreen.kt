@@ -78,6 +78,11 @@ fun RemoteScreen(
     status: String,
     controller: RemoteController,
     settings: AppSettings,
+    displayCount: Int = 1,
+    activeDisplayIndex: Int = 0,
+    secondaryOverlayBlocked: Boolean = false,
+    onSelectDisplay: (Int) -> Unit = {},
+    onHideMouse: () -> Unit = {},
     onKeyboard: () -> Unit,
     onBluetooth: () -> Unit,
     onDevices: () -> Unit,
@@ -124,7 +129,11 @@ fun RemoteScreen(
                     )
                     if (status.isNotEmpty()) Text(status, color = Color.Gray, fontSize = 11.sp, maxLines = 2)
                 }
-                IconButton(onClick = { touchpad = !touchpad }) {
+                IconButton(onClick = {
+                    val next = !touchpad
+                    touchpad = next
+                    if (!next) onHideMouse()
+                }) {
                     Icon(if (touchpad) Icons.Filled.OpenWith else Icons.Filled.Mouse, null, tint = Ico, modifier = Modifier.size(28.dp))
                 }
                 IconButton(onClick = onKeyboard) { Icon(Icons.Filled.Keyboard, null, tint = Ico, modifier = Modifier.size(28.dp)) }
@@ -169,7 +178,45 @@ fun RemoteScreen(
 
             // Cruceta o panel táctil (en el mismo lugar)
             if (touchpad) {
-                TouchpadArea(controller, settings, Modifier.width(rowW.dp).height(pad.dp))
+                Column(Modifier.width(rowW.dp).height(pad.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (displayCount > 1) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            for (i in 0 until displayCount) {
+                                val selected = i == activeDisplayIndex
+                                Box(
+                                    Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 34.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (selected) Color(0xFF1E88E5) else Btn)
+                                        .clickable { onSelectDisplay(i) }
+                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        if (i == 0) "Pantalla 1 (Tel)" else "Pantalla ${i + 1}",
+                                        color = if (selected) Color.White else Ico,
+                                        fontSize = 12.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                        if (activeDisplayIndex > 0 && secondaryOverlayBlocked) {
+                            Text(
+                                "Activa \"Mostrar sobre otras apps\" en el receptor para ver la flecha en la 2ª pantalla.",
+                                color = Color(0xFFF5C451),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    TouchpadArea(controller, settings, Modifier.weight(1f).fillMaxWidth())
+                }
             } else {
                 DPad(pad.dp, controller)
             }
