@@ -122,6 +122,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
         }
         regListener = null
+        main.removeCallbacksAndMessages(mediaFallbackToken)
         main.post {
             removeCursor()
             removeRing()
@@ -225,8 +226,8 @@ class RemoteAccessibilityService : AccessibilityService() {
             "VOL_UP" -> volume(AudioManager.ADJUST_RAISE)
             "VOL_DOWN" -> volume(AudioManager.ADJUST_LOWER)
             "MUTE" -> volume(AudioManager.ADJUST_TOGGLE_MUTE)
-            "PLAY" -> media(KeyEvent.KEYCODE_MEDIA_PLAY)
-            "PAUSE" -> media(KeyEvent.KEYCODE_MEDIA_PAUSE)
+            "PLAY" -> playPause(true)
+            "PAUSE" -> playPause(false)
             "REWIND" -> media(KeyEvent.KEYCODE_MEDIA_REWIND)
             "FORWARD" -> media(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
             "BRIGHT_UP" -> brightness(1)
@@ -260,8 +261,47 @@ class RemoteAccessibilityService : AccessibilityService() {
         am.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, AudioManager.FLAG_SHOW_UI)
     }
 
+    private val mediaFallbackToken = Any()
+
+    private fun playPause(play: Boolean) {
+        main.removeCallbacksAndMessages(mediaFallbackToken)
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val directCode = if (play) KeyEvent.KEYCODE_MEDIA_PLAY else KeyEvent.KEYCODE_MEDIA_PAUSE
+
+        if (!sendPcKey(directCode)) {
+            amDispatchMedia(directCode)
+        }
+
+        fun scheduleIfNeeded(delayMs: Long, action: () -> Unit) {
+            main.postAtTime({
+                val playing = am.isMusicActive
+                if ((play && !playing) || (!play && playing)) {
+                    action()
+                }
+            }, mediaFallbackToken, SystemClock.uptimeMillis() + delayMs)
+        }
+
+        scheduleIfNeeded(250L) { amDispatchMedia(directCode) }
+        scheduleIfNeeded(550L) {
+            if (!sendPcKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)) {
+                amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+            }
+        }
+        scheduleIfNeeded(900L) { amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) }
+        scheduleIfNeeded(1250L) {
+            val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focused?.isEditable != true) {
+                sendPcKey(KeyEvent.KEYCODE_SPACE)
+            }
+        }
+    }
+
     private fun media(code: Int) {
         if (sendPcKey(code)) return
+        amDispatchMedia(code)
+    }
+
+    private fun amDispatchMedia(code: Int) {
         val now = SystemClock.uptimeMillis()
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         am.dispatchMediaKeyEvent(
