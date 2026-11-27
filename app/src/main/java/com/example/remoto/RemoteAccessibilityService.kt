@@ -1190,7 +1190,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         val path = Path()
         path.moveTo(dragLastX, dragLastY)
         path.lineTo(cx, cy)
-        val next = stroke.continueStroke(path, 0L, 20L, !end)
+        val next = stroke.continueStroke(path, 0L, if (end) 50L else 20L, !end)
         dragLastX = cx
         dragLastY = cy
         if (end) {
