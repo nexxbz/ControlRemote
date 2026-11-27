@@ -234,7 +234,10 @@ class RemoteAccessibilityService : AccessibilityService() {
             "FORWARD" -> media(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
             "BRIGHT_UP" -> brightness(1)
             "BRIGHT_DOWN" -> brightness(-1)
-            "OK" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_CENTER)) dpad(4)
+            "OK" -> {
+                if (ring?.visibility == View.VISIBLE) okPress()
+                else if (!sendPcKey(KeyEvent.KEYCODE_DPAD_CENTER)) dpad(4)
+            }
             "UP" -> arrow(0, KeyEvent.KEYCODE_DPAD_UP)
             "DOWN" -> arrow(1, KeyEvent.KEYCODE_DPAD_DOWN)
             "LEFT" -> arrow(2, KeyEvent.KEYCODE_DPAD_LEFT)
@@ -254,58 +257,103 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     private fun arrow(dir: Int, keyCode: Int) {
         main.removeCallbacksAndMessages(focusRecoverToken)
+        if (ring?.visibility == View.VISIBLE) {
+            moveVirtual(dir, true)
+            return
+        }
+        val beforeNode = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val beforeRect = beforeNode?.let { Rect().apply { it.getBoundsInScreen(this) } }
         if (!sendPcKey(keyCode)) {
             dpad(dir)
             return
         }
         main.postAtTime({
-            recoverFocusIfLost(dir)
+            recoverFocusIfStuck(dir, beforeRect)
         }, focusRecoverToken, SystemClock.uptimeMillis() + 120L)
     }
 
-    private fun recoverFocusIfLost(dir: Int) {
+    private fun recoverFocusIfStuck(dir: Int, beforeRect: Rect?) {
         val root = rootInActiveWindow ?: return
-        if (root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) != null) return
-        val all = ArrayList<Cand>()
-        collect(root, all, 0)
-        val focusables = all.filter { it.node.isFocusable && it.node.isVisibleToUser }
-        if (focusables.isEmpty()) return
+        val afterNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         val direction = when (dir) {
             0 -> View.FOCUS_UP
             1 -> View.FOCUS_DOWN
             2 -> View.FOCUS_LEFT
             else -> View.FOCUS_RIGHT
         }
-        val selected = focusables.firstOrNull { it.node.isSelected }
-        if (selected != null) {
-            val next = selected.node.focusSearch(direction)
-            if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
-            val sx = selected.rect.exactCenterX()
-            val sy = selected.rect.exactCenterY()
-            val geometric = focusables
-                .filter { it !== selected }
-                .mapNotNull { c ->
-                    val dx = c.rect.exactCenterX() - sx
-                    val dy = c.rect.exactCenterY() - sy
-                    val primary = when (dir) {
-                        0 -> -dy
-                        1 -> dy
-                        2 -> -dx
-                        else -> dx
-                    }
-                    if (primary <= 4f) null
-                    else {
-                        val perp = if (dir < 2) abs(dx) else abs(dy)
-                        c to (primary + 2f * perp)
-                    }
-                }
-                .minByOrNull { it.second }
-                ?.first
-            if (geometric != null && geometric.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
-            if (selected.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+
+        if (afterNode == null) {
+            val all = ArrayList<Cand>()
+            collect(root, all, 0)
+            val focusables = all.filter { it.node.isFocusable && it.node.isVisibleToUser }
+            if (focusables.isEmpty()) return
+            val selected = focusables.firstOrNull { it.node.isSelected }
+            if (selected != null) {
+                val next = selected.node.focusSearch(direction)
+                if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+                val geom = nearestInDirection(focusables, selected.rect, dir)
+                if (geom != null && geom.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+                if (selected.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+            }
+            val fallback = focusables.minWithOrNull(compareBy<Cand>({ it.rect.top / 40 }, { it.rect.left }))?.node
+            fallback?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            return
         }
-        val fallback = focusables.minWithOrNull(compareBy<Cand>({ it.rect.top / 40 }, { it.rect.left }))?.node
-        fallback?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+
+        if (beforeRect == null || afterNode.isEditable || afterNode.isScrollable || afterNode.rangeInfo != null) return
+        val afterRect = Rect()
+        afterNode.getBoundsInScreen(afterRect)
+        if (afterRect != beforeRect) return
+
+        // El evento de teclado no movió el foco desde afterNode: intentamos moverlo al elemento vecino en dir
+        val next = afterNode.focusSearch(direction)
+        if (next != null && next != afterNode && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
+            removeRing()
+            return
+        }
+
+        val all = ArrayList<Cand>()
+        collect(root, all, 0)
+        val m = resources.displayMetrics
+        val screenArea = m.widthPixels.toFloat() * m.heightPixels
+        val small = all.filter { it.rect.width().toFloat() * it.rect.height() < screenArea * 0.7f }
+        val focusables = small.filter { it.node.isFocusable && it.node.isVisibleToUser }
+        val geom = nearestInDirection(focusables, afterRect, dir)
+        if (geom != null && geom.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
+            removeRing()
+            return
+        }
+
+        // Si el vecino en dir solo es clicable (no focusable), permitimos seleccionarlo con el recuadro
+        val clickables = small.filter { it.node.isClickable && it.node.isVisibleToUser }
+        val clickableNeighbor = nearestInDirection(clickables, afterRect, dir)
+        if (clickableNeighbor != null) {
+            showRing(clickableNeighbor.rect)
+        }
+    }
+
+    private fun nearestInDirection(list: List<Cand>, from: Rect, dir: Int): Cand? {
+        val sx = from.exactCenterX()
+        val sy = from.exactCenterY()
+        return list
+            .filter { it.rect != from }
+            .mapNotNull { c ->
+                val dx = c.rect.exactCenterX() - sx
+                val dy = c.rect.exactCenterY() - sy
+                val primary = when (dir) {
+                    0 -> -dy
+                    1 -> dy
+                    2 -> -dx
+                    else -> dx
+                }
+                if (primary <= 4f) null
+                else {
+                    val perp = if (dir < 2) abs(dx) else abs(dy)
+                    c to (primary + 2f * perp)
+                }
+            }
+            .minByOrNull { it.second }
+            ?.first
     }
 
     private fun sendPcKey(keyCode: Int): Boolean {
@@ -508,7 +556,8 @@ class RemoteAccessibilityService : AccessibilityService() {
         val screenArea = m.widthPixels.toFloat() * m.heightPixels
         var list: List<Cand> = all.filter { it.rect.width().toFloat() * it.rect.height() < screenArea * 0.7f }
         val focusables = list.filter { it.node.isFocusable }
-        if (focusables.size >= 2) list = focusables
+        val ringOnNonFocusable = ringBounds != null && list.any { it.rect == ringBounds } && focusables.none { it.rect == ringBounds }
+        if (focusables.size >= 2 && !ringOnNonFocusable) list = focusables
         if (list.isEmpty()) return
 
         var cur: Rect? = ringBounds?.let { r -> list.firstOrNull { it.rect == r }?.rect }
@@ -551,6 +600,12 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
         val target = best
         if (target != null) {
+            if (RemoteKeyboardService.isSelected(this) && target.node.isFocusable &&
+                target.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            ) {
+                removeRing()
+                return
+            }
             showRing(target.rect)
             return
         }
