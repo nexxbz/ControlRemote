@@ -22,17 +22,28 @@ android {
     }
 
     // Misma firma en todos los builds: así Android acepta instalar la actualización encima.
+    val localKeystore = file("debug.keystore")
+    val rootKeystore = file("${rootDir}/debug.keystore")
+    val activeKeystore = when {
+        localKeystore.exists() -> localKeystore
+        rootKeystore.exists() -> rootKeystore
+        else -> null
+    }
     signingConfigs {
-        create("debugConfig") {
-            storeFile = file("${rootDir}/debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (activeKeystore != null) {
+            create("debugConfig") {
+                storeFile = activeKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
     }
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("debugConfig")
+            if (activeKeystore != null) {
+                signingConfig = signingConfigs.getByName("debugConfig")
+            }
         }
     }
 
