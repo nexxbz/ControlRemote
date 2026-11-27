@@ -106,6 +106,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         val m = resources.displayMetrics
         cx = m.widthPixels / 2f
         cy = m.heightPixels / 2f
+        ShizukuBridge.tryBindIfPermitted(this)
         registerDisplayListener()
         startServer()
         registerNsd()
@@ -145,6 +146,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
         regListener = null
         clients.clear()
+        ShizukuBridge.unbind()
         main.removeCallbacksAndMessages(mediaFallbackToken)
         main.removeCallbacksAndMessages(focusRecoverToken)
         main.post {
@@ -433,11 +435,18 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun sendPcKey(keyCode: Int): Boolean {
-        if (!RemoteKeyboardService.isSelected(this)) return false
-        val ime = RemoteKeyboardService.instance ?: return false
-        val sent = ime.sendPcKey(keyCode)
-        if (sent) removeRing()
-        return sent
+        if (RemoteKeyboardService.isSelected(this)) {
+            val ime = RemoteKeyboardService.instance
+            if (ime != null && ime.sendPcKey(keyCode)) {
+                removeRing()
+                return true
+            }
+        }
+        if (ShizukuBridge.sendKey(keyCode)) {
+            removeRing()
+            return true
+        }
+        return false
     }
 
     private fun volume(direction: Int) {
@@ -1069,6 +1078,15 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun moveCursor(dx: Int, dy: Int) {
+        if (ShizukuBridge.isUhidReady()) {
+            hideCursorNow()
+            if (secondaryOverlayBlocked) {
+                secondaryOverlayBlocked = false
+                notifyDisplayState()
+            }
+            ShizukuBridge.moveUhid(dx, dy)
+            return
+        }
         val displays = allDisplays()
         var displayChanged = displays.size != lastKnownDisplayCount
         lastKnownDisplayCount = displays.size
@@ -1142,8 +1160,14 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var dragLastX = 0f
     private var dragLastY = 0f
     private var dragDisplayId = Display.DEFAULT_DISPLAY
+    private var uhidDragging = false
 
     private fun dragStart() {
+        if (ShizukuBridge.isUhidReady()) {
+            uhidDragging = true
+            ShizukuBridge.drag(activeDisplayId, cx, cy, 0)
+            return
+        }
         if (dragStroke != null) return
         dragLastX = cx
         dragLastY = cy
@@ -1177,6 +1201,11 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun dragEnd() {
+        if (uhidDragging) {
+            uhidDragging = false
+            ShizukuBridge.drag(activeDisplayId, cx, cy, 2)
+            return
+        }
         if (dragStroke == null) return
         dragEndRequested = true
         dragPump()
@@ -1223,6 +1252,14 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun clickAtCursor(hold: Boolean) {
+        if (ShizukuBridge.isUhidReady()) {
+            ShizukuBridge.click(activeDisplayId, cx, cy, hold)
+            return
+        }
+        if (activeDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.click(activeDisplayId, cx, cy, hold)) {
+            showCursor()
+            return
+        }
         val path = Path()
         path.moveTo(cx, cy)
         gesture(path, if (hold) 700L else 60L)
@@ -1231,6 +1268,14 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     private fun scrollAtCursor(amount: Int) {
         if (amount == 0) return
+        if (ShizukuBridge.isUhidReady()) {
+            ShizukuBridge.scroll(activeDisplayId, cx, cy, amount.toFloat())
+            return
+        }
+        if (activeDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.scroll(activeDisplayId, cx, cy, amount.toFloat())) {
+            showCursor()
+            return
+        }
         val s = activeDisplaySize()
         val dist = 150f * amount
         val y2 = (cy + dist).coerceIn(0f, s.y.toFloat())

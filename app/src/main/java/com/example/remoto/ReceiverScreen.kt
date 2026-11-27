@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -52,12 +53,17 @@ fun ReceiverScreen(
     ip: String?,
     canWriteSettings: Boolean,
     canDrawOverlays: Boolean,
+    shizukuAvailable: Boolean,
+    shizukuConnected: Boolean,
+    shizukuUhid: Boolean,
+    shizukuDetail: String,
     onOpenAccessibility: () -> Unit,
     onOpenAppInfo: () -> Unit,
     onOpenImeSettings: () -> Unit,
     onSelectIme: () -> Unit,
     onOpenWriteSettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
+    onConnectShizuku: () -> Unit,
     onNewPin: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -192,7 +198,28 @@ fun ReceiverScreen(
             }
         }
 
-        // 4. Mouse en segunda pantalla (scrcpy --new-display)
+        // 4. Mouse real por Wi-Fi con Shizuku
+        StatusCard(
+            icon = Icons.Filled.Mouse,
+            title = "Mouse real con Shizuku (Wi-Fi)",
+            active = shizukuConnected,
+            description = when {
+                shizukuUhid -> "Activo: mouse HID real del sistema (/dev/uhid). Funciona en todas las pantallas incluida scrcpy --new-display sin Bluetooth."
+                shizukuConnected -> "Conectado (${shizukuDetail.ifBlank { "inyección directa" }}): mouse y teclas reales por Shizuku."
+                shizukuAvailable -> "Shizuku detectado. Toca para conceder permiso y activar el mouse real por Wi-Fi."
+                else -> "Opcional: si usas Shizuku iniciado por ADB/PC, activa el mouse físico real del sistema sin usar Bluetooth."
+            }
+        ) {
+            if (!shizukuConnected) {
+                AmberOutlinedButton(
+                    text = if (shizukuAvailable) "Conectar / Permitir Shizuku" else "Abrir Shizuku",
+                    tag = "connect_shizuku_button",
+                    onClick = onConnectShizuku
+                )
+            }
+        }
+
+        // 5. Mouse en segunda pantalla (scrcpy --new-display)
         StatusCard(
             icon = Icons.Filled.Layers,
             title = "Mouse en segunda pantalla (scrcpy)",
@@ -200,7 +227,7 @@ fun ReceiverScreen(
             description = if (canDrawOverlays) {
                 "Permiso concedido: el cursor del mouse se muestra también en la pantalla virtual de scrcpy."
             } else {
-                "Permite dibujar el cursor del mouse encima de la pantalla virtual scrcpy --new-display."
+                "Respaldo si no usas Shizuku: permite dibujar el cursor encima de scrcpy --new-display."
             }
         ) {
             if (!canDrawOverlays) {

@@ -243,6 +243,7 @@ fun App(
             )
         }
         Screen.RECEIVER -> {
+            LaunchedEffect(tick) { ShizukuBridge.tryBindIfPermitted(context) }
             val enabled = remember(tick) { isServiceEnabled(context) }
             val imeEnabled = remember(tick) { RemoteKeyboardService.isEnabled(context) }
             val imeSelected = remember(tick) { RemoteKeyboardService.isSelected(context) }
@@ -256,6 +257,10 @@ fun App(
                 ip = ownIp,
                 canWriteSettings = canWrite,
                 canDrawOverlays = canOverlay,
+                shizukuAvailable = ShizukuBridge.available,
+                shizukuConnected = ShizukuBridge.connected,
+                shizukuUhid = ShizukuBridge.uhidActive,
+                shizukuDetail = ShizukuBridge.statusDetail,
                 onOpenAccessibility = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                 onOpenAppInfo = {
                     context.startActivity(
@@ -273,6 +278,11 @@ fun App(
                     context.startActivity(
                         Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))
                     )
+                },
+                onConnectShizuku = {
+                    if (!ShizukuBridge.requestOrConnect(context)) {
+                        Toast.makeText(context, "Inicia Shizuku en este teléfono primero (por ADB o Depuración inalámbrica).", Toast.LENGTH_LONG).show()
+                    }
                 },
                 onNewPin = { pinText = ReceiverPin.renew(context) },
                 onBack = { screen = Screen.DEVICES }
