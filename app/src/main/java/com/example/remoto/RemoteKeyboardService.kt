@@ -53,14 +53,7 @@ class RemoteKeyboardService : InputMethodService() {
             main.removeCallbacks(it)
             it.run()
         }
-        val source = when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP,
-            KeyEvent.KEYCODE_DPAD_DOWN,
-            KeyEvent.KEYCODE_DPAD_LEFT,
-            KeyEvent.KEYCODE_DPAD_RIGHT,
-            KeyEvent.KEYCODE_DPAD_CENTER -> InputDevice.SOURCE_KEYBOARD or InputDevice.SOURCE_DPAD
-            else -> InputDevice.SOURCE_KEYBOARD
-        }
+        val source = InputDevice.SOURCE_KEYBOARD
         val downTime = SystemClock.uptimeMillis()
         val down = KeyEvent(
             downTime,

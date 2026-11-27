@@ -268,11 +268,11 @@ class RemoteAccessibilityService : AccessibilityService() {
             return
         }
         main.postAtTime({
-            recoverFocusIfStuck(dir, beforeRect)
-        }, focusRecoverToken, SystemClock.uptimeMillis() + 120L)
+            recoverFocusIfStuck(dir, beforeNode, beforeRect)
+        }, focusRecoverToken, SystemClock.uptimeMillis() + 160L)
     }
 
-    private fun recoverFocusIfStuck(dir: Int, beforeRect: Rect?) {
+    private fun recoverFocusIfStuck(dir: Int, beforeNode: AccessibilityNodeInfo?, beforeRect: Rect?) {
         val root = rootInActiveWindow ?: return
         val afterNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         val direction = when (dir) {
@@ -300,7 +300,8 @@ class RemoteAccessibilityService : AccessibilityService() {
             return
         }
 
-        if (beforeRect == null || afterNode.isEditable || afterNode.isScrollable || afterNode.rangeInfo != null) return
+        if (beforeNode == null || beforeRect == null || afterNode.isEditable || afterNode.isScrollable || afterNode.rangeInfo != null) return
+        if (afterNode != beforeNode) return
         val afterRect = Rect()
         afterNode.getBoundsInScreen(afterRect)
         if (afterRect != beforeRect) return
