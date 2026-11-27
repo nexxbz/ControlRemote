@@ -190,7 +190,7 @@ object ShizukuBridge {
         val a = args ?: Shizuku.UserServiceArgs(ComponentName(ctx, ShizukuInputService::class.java))
             .daemon(false)
             .processNameSuffix("shizuku_input")
-            .version(2)
+            .version(3)
             .debuggable(BuildConfig.DEBUG)
             .also { args = it }
         try {

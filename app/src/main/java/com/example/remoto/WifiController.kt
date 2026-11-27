@@ -58,6 +58,8 @@ class WifiController : RemoteController {
         private set
     var secondaryOverlayBlocked by mutableStateOf(false)
         private set
+    var displayNote by mutableStateOf("")
+        private set
 
     private val io = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
@@ -78,11 +80,13 @@ class WifiController : RemoteController {
                         val count = (parts.getOrNull(0)?.toIntOrNull() ?: 1).coerceAtLeast(1)
                         val activeIdx = (parts.getOrNull(1)?.toIntOrNull() ?: 0).coerceIn(0, count - 1)
                         val blocked = parts.getOrNull(2) == "1"
+                        val note = parts.getOrNull(3) ?: ""
                         main.post {
                             if (socket === s) {
                                 displayCount = count
                                 activeDisplayIndex = activeIdx
                                 secondaryOverlayBlocked = blocked
+                                displayNote = note
                             }
                         }
                     }
@@ -169,6 +173,7 @@ class WifiController : RemoteController {
             displayCount = 1
             activeDisplayIndex = 0
             secondaryOverlayBlocked = false
+            displayNote = ""
         }
     }
 

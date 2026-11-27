@@ -231,6 +231,7 @@ fun App(
                 displayCount = hybrid.displayCount,
                 activeDisplayIndex = hybrid.activeDisplayIndex,
                 secondaryOverlayBlocked = hybrid.secondaryOverlayBlocked,
+                displayNote = hybrid.displayNote,
                 onSelectDisplay = { hybrid.selectDisplay(it) },
                 onHideMouse = { hybrid.hideMouse() },
                 onKeyboard = { showKeyboard = true },

@@ -1,0 +1,650 @@
+package com.mandobt
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.app.AlertDialog
+import android.app.DownloadManager
+import android.net.Uri
+import android.bluetooth.BluetoothAdapter
+import android.content.SharedPreferences
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.os.Build
+import android.os.Bundle
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.HapticFeedbackConstants
+import android.view.Gravity
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
+import android.view.Surface
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.provider.Settings
+import android.widget.*
+
+@SuppressLint("MissingPermission", "ClickableViewAccessibility")
+class MainActivity : Activity() {
+    private lateinit var prefs: SharedPreferences
+    private val hid: HidController? get() = HidHolder.hid
+    private var sensorMgr: SensorManager? = null
+    private lateinit var status: TextView
+    private lateinit var pad: PadView
+    private lateinit var touch: TouchPad
+    private lateinit var kb: LinearLayout
+    private lateinit var touch2: TouchPad
+    private lateinit var editBar: LinearLayout
+    private var cur = "xbox"
+    private var activo: String? = null
+    private var gyroK = 1f / 3f
+    private var gyroInvF = 1f
+    private var mods = 0
+    private val keysDown = mutableListOf<Int>()
+    private val modBtns = mutableMapOf<Int, Button>()
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
+    private fun btn(t: String, f: () -> Unit) = Button(this).apply {
+        text = t; isAllCaps = false; setOnClickListener { f() }
+    }
+
+    private fun small(t: String, f: () -> Unit) = Button(this).apply {
+        text = t; isAllCaps = false; textSize = 12f; minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+        setPadding(dp(10), 0, dp(10), 0); alpha = .9f; setOnClickListener { f() }
+    }
+
+    override fun onCreate(b: Bundle?) {
+        super.onCreate(b)
+        try {
+            construir()
+        } catch (e: Throwable) {
+            val tv = TextView(this).apply {
+                text = "Error al iniciar. Envía una captura de este texto:\n\n" + android.util.Log.getStackTraceString(e)
+                setTextColor(Color.WHITE); textSize = 11f; setPadding(dp(12), dp(12), dp(12), dp(12))
+            }
+            setContentView(ScrollView(this).apply { setBackgroundColor(0xFF12151C.toInt()); addView(tv) })
+        }
+    }
+
+    private fun construir() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        prefs = getSharedPreferences("mando", MODE_PRIVATE)
+        cur = prefs.getString("profile", "xbox") ?: "xbox"
+        status = TextView(this).apply {
+            setTextColor(0xFFB8C0D0.toInt()); textSize = 12f; setPadding(dp(8), 0, dp(8), 0); text = HidHolder.lastStatus; maxLines = 1
+        }
+        HidHolder.onStatus = { s -> runOnUiThread { status.text = s } }
+        sensorMgr = getSystemService(SensorManager::class.java)
+        pad = PadView(this)
+        touch = TouchPad(this)
+        touch2 = TouchPad(this)
+        pad.onReport = { hid?.send(1, it) }
+        pad.onToggleGyro = { setGyro(!pad.gyroOn) }
+        touch.onMouse = { bt, dx, dy, w -> sendMouse(bt, dx, dy, w) }
+        touch2.onMouse = touch.onMouse
+        loadProfile(cur)
+        activo = prefs.getString("perfil_activo", null)
+        activo?.let { if (!cargarPerfil(it)) activo = null }
+
+        val menuBtn = Button(this).apply {
+            text = "☰"; textSize = 20f; minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+            setPadding(0, 0, 0, 0); alpha = .85f; setOnClickListener { menu() }
+        }
+        editBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; visibility = View.GONE
+            addView(small("Más grande") { pad.selected?.let { it.size = (it.size * 1.1f).coerceAtMost(.35f); pad.invalidate() } }, LinearLayout.LayoutParams(-2, dp(40)))
+            addView(small("Más pequeño") { pad.selected?.let { it.size = (it.size / 1.1f).coerceAtLeast(.03f); pad.invalidate() } }, LinearLayout.LayoutParams(-2, dp(40)))
+            addView(small("Guardar") { guardarActual() }, LinearLayout.LayoutParams(-2, dp(40)))
+            addView(small("Restablecer") {
+                prefs.edit().remove("layout_$cur").apply()
+                pad.ctls = Templates.build(cur); pad.selected = null; pad.invalidate()
+            }, LinearLayout.LayoutParams(-2, dp(40)))
+            addView(small("Listo") { toggleEdit() }, LinearLayout.LayoutParams(-2, dp(40)))
+        }
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(menuBtn, LinearLayout.LayoutParams(dp(48), dp(40)))
+            addView(status)
+            addView(editBar)
+        }
+
+        kb = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; visibility = View.GONE
+            setPadding(dp(4), dp(48), dp(4), dp(4))
+            addView(buildKeyboard(), LinearLayout.LayoutParams(0, -1, 7f))
+            addView(touch2, LinearLayout.LayoutParams(0, -1, 3f).apply { leftMargin = dp(6) })
+        }
+        touch.visibility = View.GONE
+        val mp = ViewGroup.LayoutParams.MATCH_PARENT
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(0xFF12151C.toInt())
+            addView(pad, FrameLayout.LayoutParams(mp, mp))
+            addView(touch, FrameLayout.LayoutParams(mp, mp))
+            addView(kb, FrameLayout.LayoutParams(mp, mp))
+            addView(topRow, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(4) })
+        }
+        setContentView(root)
+        immersive()
+        applyPrefs()
+        ensurePerm()
+        buscarActualizacion(false)
+        if (prefs.getBoolean("gyro_on", false)) setGyro(true)
+
+        val splash = ImageView(this).apply {
+            setImageResource(R.drawable.portada)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(resources.getColor(R.color.portada_fondo, theme))
+            isClickable = true
+        }
+        root.addView(splash, FrameLayout.LayoutParams(mp, mp))
+        splash.postDelayed({
+            splash.animate().alpha(0f).setDuration(400).withEndAction { root.removeView(splash) }.start()
+        }, 1400)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun immersive() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.let {
+                it.hide(WindowInsets.Type.systemBars())
+                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) immersive()
+    }
+
+    override fun onDestroy() {
+        HidHolder.onStatus = null
+        sensorMgr?.unregisterListener(gyroListener)
+        super.onDestroy()
+    }
+
+    private fun ensurePerm() {
+        val need = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 31) {
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) need.add(Manifest.permission.BLUETOOTH_CONNECT)
+            if (checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED) need.add(Manifest.permission.BLUETOOTH_ADVERTISE)
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            need.add(Manifest.permission.POST_NOTIFICATIONS)
+        if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 1) else iniciarServicio()
+    }
+
+    override fun onRequestPermissionsResult(r: Int, p: Array<out String>, g: IntArray) {
+        if (Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) iniciarServicio()
+        else status.text = "Falta el permiso de Bluetooth"
+    }
+
+    private fun iniciarServicio() {
+        startForegroundService(Intent(this, KeepAliveService::class.java))
+    }
+
+    private fun show(m: Int) {
+        pad.visibility = if (m == 0) View.VISIBLE else View.GONE
+        touch.visibility = if (m == 1) View.VISIBLE else View.GONE
+        kb.visibility = if (m == 2) View.VISIBLE else View.GONE
+        if (m != 0 && pad.edit) toggleEdit()
+    }
+
+    private fun toggleEdit() {
+        pad.setEdit(!pad.edit)
+        editBar.visibility = if (pad.edit) View.VISIBLE else View.GONE
+        if (pad.edit) toast("Arrastra los botones. Toca uno para cambiar su tamaño.")
+    }
+
+    // ---------------- Giroscopio ----------------
+    private val gyroListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            @Suppress("DEPRECATION") val rot = windowManager.defaultDisplay.rotation
+            val wx = e.values[0]
+            val wy = e.values[1]
+            val right: Float
+            val up: Float
+            when (rot) {
+                Surface.ROTATION_90 -> { right = wy; up = -wx }
+                Surface.ROTATION_270 -> { right = -wy; up = wx }
+                Surface.ROTATION_180 -> { right = -wx; up = -wy }
+                else -> { right = wx; up = wy }
+            }
+            val k = gyroK
+            val inv = gyroInvF
+            pad.setGyro(up * k, right * k * inv)
+        }
+
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    }
+
+    private fun setGyro(on: Boolean) {
+        val sm = sensorMgr
+        sm?.unregisterListener(gyroListener)
+        var activo = on
+        if (on) {
+            val s = sm?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            if (s == null) { toast("Este teléfono no tiene giroscopio"); activo = false }
+            else sm.registerListener(gyroListener, s, SensorManager.SENSOR_DELAY_GAME)
+        }
+        pad.gyroOn = activo
+        pad.setGyro(0f, 0f)
+        prefs.edit().putBoolean("gyro_on", activo).apply()
+        pad.invalidate()
+    }
+
+    private fun menu() {
+        val consola = Templates.names.first { it.first == cur }.second
+        val items = arrayOf(
+            "Mando", "Ratón", "Teclado", "Consola: $consola",
+            "Mis perfiles" + (activo?.let { " ($it)" } ?: ""),
+            "Giroscopio: " + if (pad.gyroOn) "activado" else "desactivado",
+            "Sensibilidad y ajustes",
+            if (pad.edit) "Terminar de editar" else "Editar botones",
+            "Hacerse visible para emparejar", "Conectar a un equipo",
+            "Batería: mantener conexión en segundo plano",
+            "Actualizaciones",
+            "Salir"
+        )
+        AlertDialog.Builder(this).setTitle(status.text.toString()).setItems(items) { _, i ->
+            when (i) {
+                0 -> show(0); 1 -> show(1); 2 -> show(2)
+                3 -> profileDialog(); 4 -> perfilesDialog()
+                5 -> setGyro(!pad.gyroOn)
+                6 -> settings()
+                7 -> { show(0); toggleEdit() }
+                8 -> visible(); 9 -> connectDialog()
+                10 -> startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                11 -> actualizacionesDialog()
+                12 -> salir()
+            }
+        }.show()
+    }
+
+    // ---------------- Perfiles de distribución ----------------
+    private fun perfiles(): MutableList<String> {
+        val a = org.json.JSONArray(prefs.getString("perfiles", "[]") ?: "[]")
+        return MutableList(a.length()) { a.getString(it) }
+    }
+
+    // ---------------- Sensibilidad por juego ----------------
+    // Si hay un perfil activo, las sensibilidades se guardan y se leen de ese perfil.
+    // Si no hay perfil, valen para todos los juegos.
+    private fun sensJson(n: String): org.json.JSONObject =
+        try { org.json.JSONObject(prefs.getString("pfs_$n", "{}") ?: "{}") } catch (_: Exception) { org.json.JSONObject() }
+
+    private fun sv(key: String, def: Int): Int {
+        val a = activo
+        if (a != null) { val j = sensJson(a); if (j.has(key)) return j.getInt(key) }
+        return prefs.getInt(key, def)
+    }
+
+    private fun svb(key: String): Boolean {
+        val a = activo
+        if (a != null) { val j = sensJson(a); if (j.has(key)) return j.getBoolean(key) }
+        return prefs.getBoolean(key, false)
+    }
+
+    private fun ss(key: String, v: Int) {
+        val a = activo
+        if (a != null) prefs.edit().putString("pfs_$a", sensJson(a).put(key, v).toString()).apply()
+        else prefs.edit().putInt(key, v).apply()
+    }
+
+    private fun ssb(key: String, v: Boolean) {
+        val a = activo
+        if (a != null) prefs.edit().putString("pfs_$a", sensJson(a).put(key, v).toString()).apply()
+        else prefs.edit().putBoolean(key, v).apply()
+    }
+
+    private fun guardarPerfil(name: String) {
+        val l = perfiles()
+        if (name !in l) l.add(name)
+        if (!prefs.contains("pfs_$name")) {
+            val g = sv("gain", 100)
+            val j = org.json.JSONObject().put("gain", g).put("gain_r", sv("gain_r", g))
+                .put("dead", sv("dead", 8)).put("gyro", sv("gyro", 100)).put("gyroinv", svb("gyroinv"))
+            prefs.edit().putString("pfs_$name", j.toString()).apply()
+        }
+        prefs.edit().putString("perfiles", org.json.JSONArray(l).toString())
+            .putString("pf_$name", pad.toJson()).putString("perfil_activo", name).apply()
+        activo = name
+        applyPrefs()
+        toast("Perfil «$name» guardado")
+    }
+
+    private fun cargarPerfil(name: String): Boolean {
+        val s = prefs.getString("pf_$name", null) ?: return false
+        return try {
+            pad.load(s); activo = name
+            prefs.edit().putString("perfil_activo", name).apply(); true
+        } catch (_: Exception) { false }
+    }
+
+    private fun borrarPerfil(name: String) {
+        val l = perfiles(); l.remove(name)
+        prefs.edit().putString("perfiles", org.json.JSONArray(l).toString()).remove("pf_$name").remove("pfs_$name").apply()
+        if (activo == name) { activo = null; prefs.edit().remove("perfil_activo").apply() }
+    }
+
+    private fun pedirNombre(f: (String) -> Unit) {
+        val et = EditText(this).apply { hint = "Nombre del perfil"; setSingleLine(true) }
+        AlertDialog.Builder(this).setTitle("Guardar como perfil").setView(et)
+            .setPositiveButton("Guardar") { _, _ ->
+                val n = et.text.toString().trim()
+                if (n.isNotEmpty()) f(n) else toast("Escribe un nombre")
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun guardarActual() {
+        val a = activo
+        if (a != null) guardarPerfil(a) else pedirNombre { guardarPerfil(it) }
+    }
+
+    private fun perfilesDialog() {
+        val l = perfiles()
+        val items = (l.map { if (it == activo) "✓ $it" else it } + "＋ Guardar la distribución actual como perfil nuevo").toTypedArray()
+        AlertDialog.Builder(this).setTitle("Mis perfiles").setItems(items) { _, i ->
+            if (i == l.size) pedirNombre { guardarPerfil(it) }
+            else {
+                val n = l[i]
+                AlertDialog.Builder(this).setTitle(n)
+                    .setItems(arrayOf("Usar este perfil", "Guardar la distribución actual aquí", "Borrar perfil")) { _, j ->
+                        when (j) {
+                            0 -> if (cargarPerfil(n)) { applyPrefs(); show(0) } else toast("No se pudo cargar")
+                            1 -> guardarPerfil(n)
+                            2 -> { borrarPerfil(n); applyPrefs(); toast("Perfil borrado") }
+                        }
+                    }.show()
+            }
+        }.show()
+    }
+
+    private fun profileDialog() {
+        val n = Templates.names
+        AlertDialog.Builder(this).setTitle("Consola").setItems(n.map { it.second }.toTypedArray()) { _, i ->
+            loadProfile(n[i].first)
+            activo = null
+            prefs.edit().remove("perfil_activo").apply()
+            prefs.edit().putString("profile", cur).apply()
+            applyPrefs()
+            show(0)
+        }.show()
+    }
+
+    private fun loadProfile(key: String) {
+        cur = key
+        val s = prefs.getString("layout_$key", null)
+        try {
+            if (s != null) pad.load(s) else { pad.ctls = Templates.build(key); pad.selected = null }
+        } catch (_: Exception) { pad.ctls = Templates.build(key) }
+        pad.invalidate()
+    }
+
+    private fun visible() {
+        startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+            .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300))
+    }
+
+    private fun connectDialog() {
+        val l = hid?.bonded ?: emptyList()
+        val b = AlertDialog.Builder(this).setTitle("Conectar a PC o teléfono")
+        if (l.isEmpty()) {
+            b.setMessage("No hay equipos emparejados. Pulsa «Ajustes Bluetooth» para emparejar uno, o usa «Hacerse visible para emparejar» y búscalo desde el otro equipo.")
+        } else {
+            val conn = hid?.hostAddress
+            val names = l.map { (if (it.address == conn) "✓ " else "") + (it.name ?: it.address) }.toTypedArray()
+            b.setItems(names) { _, i ->
+                if (conn != null && conn != l[i].address)
+                    toast("Solo se puede estar conectado a un equipo a la vez. Cambiando de equipo…")
+                hid?.connect(l[i])
+            }
+        }
+        b.setNeutralButton("Desconectar") { _, _ ->
+            if (hid?.connected == true) { hid?.disconnect(); toast("Desconectado") }
+            else toast("No hay ningún equipo conectado")
+        }
+        b.setPositiveButton("Ajustes Bluetooth") { _, _ ->
+            startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+        }
+        b.show()
+    }
+
+    // ---------------- Actualizaciones desde GitHub ----------------
+    private fun versionActual(): Int =
+        try { packageManager.getPackageInfo(packageName, 0).longVersionCode.toInt() } catch (_: Exception) { 0 }
+
+    private fun actualizacionesDialog() {
+        val repo = prefs.getString("repo", "") ?: ""
+        val items = arrayOf("Buscar actualización ahora", "Repositorio: " + if (repo.isBlank()) "sin configurar" else repo)
+        AlertDialog.Builder(this).setTitle("Actualizaciones (versión instalada: v${versionActual()})")
+            .setItems(items) { _, i ->
+                if (i == 0) buscarActualizacion(true) else pedirRepo { buscarActualizacion(true) }
+            }.show()
+    }
+
+    private fun pedirRepo(then: () -> Unit) {
+        val et = EditText(this).apply {
+            hint = "usuario/repositorio"; setSingleLine(true)
+            setText(prefs.getString("repo", ""))
+        }
+        AlertDialog.Builder(this).setTitle("Repositorio de GitHub")
+            .setMessage("Escribe el nombre de tu repositorio, por ejemplo: tuusuario/mando-bt")
+            .setView(et)
+            .setPositiveButton("Guardar") { _, _ ->
+                val r = et.text.toString().trim().removePrefix("https://github.com/").removePrefix("github.com/")
+                    .removeSuffix("/").removeSuffix(".git")
+                if (r.count { it == '/' } == 1 && !r.contains(' ')) {
+                    prefs.edit().putString("repo", r).apply(); then()
+                } else toast("Escríbelo así: usuario/repositorio")
+            }.setNegativeButton("Cancelar", null).show()
+    }
+
+    private fun buscarActualizacion(manual: Boolean) {
+        val repo = prefs.getString("repo", "") ?: ""
+        if (repo.isBlank()) { if (manual) pedirRepo { buscarActualizacion(true) }; return }
+        if (manual) toast("Buscando actualización…")
+        Thread {
+            val info = Updater.latest(repo)
+            runOnUiThread {
+                when {
+                    info == null -> if (manual) toast("No se pudo consultar GitHub. Revisa el repositorio (debe ser público) y la conexión.")
+                    info.num > versionActual() -> mostrarActualizacion(info)
+                    manual -> toast("Ya tienes la última versión (v${versionActual()}).")
+                }
+            }
+        }.start()
+    }
+
+    private fun mostrarActualizacion(i: Updater.Info) {
+        if (isFinishing) return
+        AlertDialog.Builder(this).setTitle("Hay una actualización")
+            .setMessage("Versión nueva: ${i.tag}. Tienes la v${versionActual()}.\n\nSe descargará la APK. Al terminar, toca la notificación para instalarla.")
+            .setPositiveButton("Descargar") { _, _ -> descargar(i.url) }
+            .setNegativeButton("Ahora no", null).show()
+    }
+
+    private fun descargar(url: String) {
+        try {
+            val r = DownloadManager.Request(Uri.parse(url)).setTitle("Mando BT").setDescription("Descargando actualización")
+                .setMimeType("application/vnd.android.package-archive")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, "MandoBT.apk")
+            getSystemService(DownloadManager::class.java).enqueue(r)
+            toast("Descargando… al terminar, toca la notificación para instalar.")
+        } catch (_: Exception) {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }
+    }
+
+    /** Cierra la app por completo: corta la conexión, detiene el servicio y la quita de recientes. */
+    private fun salir() {
+        hid?.disconnect()
+        stopService(Intent(this, KeepAliveService::class.java))
+        HidHolder.hid?.stop()
+        HidHolder.hid = null
+        finishAndRemoveTask()
+    }
+
+    private fun sendMouse(bt: Int, dx: Int, dy: Int, w: Int) {
+        var x = dx; var y = dy; var ww = w
+        do {
+            val cx = x.coerceIn(-127, 127); val cy = y.coerceIn(-127, 127); val cw = ww.coerceIn(-127, 127)
+            hid?.send(2, byteArrayOf(bt.toByte(), cx.toByte(), cy.toByte(), cw.toByte()))
+            x -= cx; y -= cy; ww -= cw
+        } while (x != 0 || y != 0 || ww != 0)
+    }
+
+    private fun applyPrefs() {
+        pad.gain = sv("gain", 100) / 100f
+        pad.gainRight = sv("gain_r", sv("gain", 100)) / 100f
+        pad.dead = sv("dead", 8) / 100f
+        gyroK = sv("gyro", 100) / 100f / 3f
+        gyroInvF = if (svb("gyroinv")) -1f else 1f
+        pad.pcMode = prefs.getBoolean("pcmode", false)
+        touch.speed = prefs.getInt("mouse", 150) / 100f
+        touch.scroll = .05f * prefs.getInt("scroll", 100) / 100f
+        touch2.speed = touch.speed
+        touch2.scroll = touch.scroll
+    }
+
+    private fun settings() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(10), dp(20), 0) }
+        fun seek(label: String, key: String, def: Int, min: Int, max: Int, game: Boolean = true) {
+            val tv = TextView(this); val sb = SeekBar(this)
+            val v0 = if (game) sv(key, def) else prefs.getInt(key, def)
+            tv.text = "$label: $v0%"
+            sb.max = max - min; sb.progress = v0 - min
+            sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) {
+                    tv.text = "$label: ${p + min}%"
+                    if (game) ss(key, p + min) else prefs.edit().putInt(key, p + min).apply()
+                    applyPrefs()
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+            box.addView(tv); box.addView(sb)
+        }
+        box.addView(TextView(this).apply {
+            val a = activo
+            text = if (a != null) "Perfil activo: «$a». La sensibilidad se guarda solo en este perfil."
+            else "No hay perfil activo: estos valores valen para todos los juegos. Para ajustar un juego, crea un perfil en Mis perfiles."
+            textSize = 12f
+            setPadding(0, 0, 0, dp(8))
+        })
+        seek("Sensibilidad al caminar (palanca izquierda)", "gain", 100, 20, 200)
+        seek("Sensibilidad de la cámara (palanca derecha)", "gain_r", sv("gain", 100), 20, 200)
+        seek("Zona muerta de palancas", "dead", 8, 0, 30)
+        seek("Velocidad del ratón", "mouse", 150, 50, 400, false)
+        seek("Velocidad de desplazamiento", "scroll", 100, 30, 300, false)
+        seek("Sensibilidad del giroscopio", "gyro", 100, 30, 300)
+        box.addView(Switch(this).apply {
+            text = "Invertir giro vertical"
+            isChecked = svb("gyroinv")
+            setOnCheckedChangeListener { _, v -> ssb("gyroinv", v); applyPrefs() }
+        })
+        box.addView(Switch(this).apply {
+            text = "Orden de botones para PC"
+            isChecked = prefs.getBoolean("pcmode", false)
+            setPadding(0, dp(12), 0, 0)
+            setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean("pcmode", v).apply(); applyPrefs() }
+        })
+        box.addView(TextView(this).apply {
+            text = "Apagado: orden estándar de Android y Linux (otro teléfono). Encendido: orden genérico para Windows."
+            textSize = 12f
+        })
+        AlertDialog.Builder(this).setTitle(activo?.let { "Ajustes de «$it»" } ?: "Ajustes generales").setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Cerrar", null).show()
+    }
+
+    // ---------------- Teclado completo ----------------
+    private class K(val l: String, val w: Float = 1f)
+
+    private val rows: List<List<K>> = listOf(
+        listOf(K("Esc", 1.5f)) + (1..12).map { K("F$it") },
+        listOf("`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=").map { K(it) } + K("⌫", 1.8f),
+        listOf(K("Tab", 1.5f)) + listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "[", "]").map { K(it) } + K("\\", 1.3f),
+        listOf(K("Caps", 1.8f)) + listOf("a", "s", "d", "f", "g", "h", "j", "k", "l", "ñ", "'").map { K(it) } + K("Enter", 2.2f),
+        listOf(K("Shift", 2.3f)) + listOf("z", "x", "c", "v", "b", "n", "m", ",", ".", "/").map { K(it) } + K("↑") + K("Shift#", 1.4f),
+        listOf(K("Ctrl", 1.3f), K("Win", 1.3f), K("Alt", 1.3f), K("Espacio", 5.5f), K("AltGr", 1.3f), K("←"), K("↓"), K("→"), K("Ctrl#", 1.3f))
+    )
+    private val modBit = mapOf("Ctrl" to 0x01, "Shift" to 0x02, "Alt" to 0x04, "Win" to 0x08,
+        "Ctrl#" to 0x10, "Shift#" to 0x20, "AltGr" to 0x40)
+    private val special = mapOf(
+        "Enter" to 0x28, "Esc" to 0x29, "⌫" to 0x2A, "Tab" to 0x2B, "Espacio" to 0x2C, "-" to 0x2D, "=" to 0x2E,
+        "[" to 0x2F, "]" to 0x30, "\\" to 0x31, "ñ" to 0x33, "'" to 0x34, "`" to 0x35, "," to 0x36, "." to 0x37,
+        "/" to 0x38, "Caps" to 0x39, "→" to 0x4F, "←" to 0x50, "↓" to 0x51, "↑" to 0x52
+    )
+
+    private fun usage(k: String): Int = when {
+        k.length == 1 && k[0] in 'a'..'z' -> 4 + (k[0] - 'a')
+        k.length == 1 && k[0] in '1'..'9' -> 0x1E + (k[0] - '1')
+        k == "0" -> 0x27
+        k.length in 2..3 && k[0] == 'F' && (k.drop(1).toIntOrNull() ?: 0) in 1..12 -> 0x3A + k.drop(1).toInt() - 1
+        else -> special[k] ?: 0
+    }
+
+    private fun shown(l: String) = if (l.length == 1 && l[0].isLetter()) l.uppercase() else l.replace("#", "")
+
+    private fun sendKb() {
+        val r = ByteArray(8)
+        r[0] = mods.toByte()
+        keysDown.take(6).forEachIndexed { i, k -> r[2 + i] = k.toByte() }
+        hid?.send(3, r)
+    }
+
+    private fun buildKeyboard(): LinearLayout {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (r in rows) {
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for (k in r) {
+                val b = Button(this).apply {
+                    text = shown(k.l); isAllCaps = false; textSize = 11f
+                    minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+                    setPadding(0, 0, 0, 0)
+                }
+                val mb = modBit[k.l]
+                if (mb != null) modBtns[mb] = b
+                val u = usage(k.l)
+                b.setOnTouchListener { v, e ->
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            if (mb != null) {
+                                mods = mods xor mb
+                                b.setTextColor(if (mods and mb != 0) Color.YELLOW else Color.WHITE)
+                                sendKb()
+                            } else if (u != 0) {
+                                if (u !in keysDown) keysDown.add(u)
+                                sendKb()
+                            }
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> if (mb == null && u != 0) {
+                            keysDown.remove(u)
+                            mods = 0
+                            modBtns.values.forEach { it.setTextColor(Color.WHITE) }
+                            sendKb()
+                        }
+                    }
+                    true
+                }
+                line.addView(b, LinearLayout.LayoutParams(0, -1, k.w).apply { setMargins(dp(1), dp(1), dp(1), dp(1)) })
+            }
+            col.addView(line, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        return col
+    }
+}

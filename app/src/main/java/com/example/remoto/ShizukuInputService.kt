@@ -65,42 +65,73 @@ class ShizukuInputService : IShizukuInput.Stub() {
         }
     }
 
+    private var lastBindInfo = ""
+
     private fun initUhid() {
-        try {
-            val fd = Os.open("/dev/uhid", OsConstants.O_RDWR, 0)
-            val ev = ByteBuffer.allocate(UHID_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
-            ev.putInt(UHID_CREATE2)
-            putCString(ev, 4, "ControlRemoto Mouse", 128)
-            putCString(ev, 132, UHID_PORT, 64)
-            putCString(ev, 196, "", 64)
-            ev.putShort(260, MOUSE_DESCRIPTOR.size.toShort())
-            ev.putShort(262, BUS_USB.toShort())
-            ev.putInt(264, 0x18D1)
-            ev.putInt(268, 0x5001)
-            ev.putInt(272, 1)
-            ev.putInt(276, 0)
-            ev.position(280)
-            ev.put(MOUSE_DESCRIPTOR)
+        synchronized(lock) {
+            try {
+                val fd = Os.open("/dev/uhid", OsConstants.O_RDWR, 0)
+                val ev = ByteBuffer.allocate(UHID_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                ev.putInt(UHID_CREATE2)
+                putCString(ev, 4, "ControlRemoto Mouse", 128)
+                putCString(ev, 132, UHID_PORT, 64)
+                putCString(ev, 196, "", 64)
+                ev.putShort(260, MOUSE_DESCRIPTOR.size.toShort())
+                ev.putShort(262, BUS_USB.toShort())
+                ev.putInt(264, 0x18D1)
+                ev.putInt(268, 0x5001)
+                ev.putInt(272, 1)
+                ev.putInt(276, 0)
+                ev.position(280)
+                ev.put(MOUSE_DESCRIPTOR)
 
-            writeFully(fd, ev.array())
-            uhidFd = fd
-            uhidActive = true
-            uhidError = null
+                writeFully(fd, ev.array())
+                uhidFd = fd
+                uhidActive = true
+                uhidError = null
 
-            Thread {
-                val buf = ByteArray(UHID_EVENT_SIZE)
-                try {
-                    while (uhidActive) {
-                        val n = Os.read(fd, buf, 0, buf.size)
-                        if (n <= 0) break
+                Thread {
+                    val buf = ByteArray(UHID_EVENT_SIZE)
+                    try {
+                        while (uhidActive && uhidFd === fd) {
+                            val n = Os.read(fd, buf, 0, buf.size)
+                            if (n <= 0) break
+                        }
+                    } catch (_: Exception) {
                     }
-                } catch (_: Exception) {
-                }
-            }.apply { isDaemon = true; start() }
-        } catch (t: Throwable) {
-            uhidActive = false
-            uhidError = t.message ?: t.javaClass.simpleName
+                }.apply { isDaemon = true; start() }
+            } catch (t: Throwable) {
+                uhidActive = false
+                uhidError = t.message ?: t.javaClass.simpleName
+            }
         }
+    }
+
+    private fun destroyUhidLocked() {
+        val fd = uhidFd
+        uhidFd = null
+        uhidActive = false
+        buttons = 0
+        if (fd != null) {
+            try {
+                val ev = ByteBuffer.allocate(UHID_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                ev.putInt(UHID_DESTROY)
+                writeFully(fd, ev.array())
+            } catch (_: Throwable) {
+            }
+            try {
+                Os.close(fd)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun recreateUhid() {
+        synchronized(lock) {
+            destroyUhidLocked()
+        }
+        SystemClock.sleep(60)
+        initUhid()
     }
 
     private fun putCString(buf: ByteBuffer, offset: Int, text: String, maxLen: Int) {
@@ -182,47 +213,83 @@ class ShizukuInputService : IShizukuInput.Stub() {
     override fun isUhidActive(): Boolean = uhidActive
 
     override fun getStatusDetail(): String = when {
-        uhidActive -> "UHID_OK"
+        uhidActive -> "UHID_OK${if (lastBindInfo.isNotEmpty()) "($lastBindInfo)" else ""}"
         inputManager != null -> "INJECT_OK:${uhidError ?: ""}"
         else -> "ERR:${uhidError ?: "sin acceso"}"
     }
 
     override fun getUhidBoundDisplayId(): Int = uhidBoundDisplayId
 
-    override fun bindUhidDisplay(displayId: Int, displayUniqueId: String?): Boolean {
-        val im = inputManager
-        if (displayId == Display.DEFAULT_DISPLAY || displayUniqueId.isNullOrBlank() || im == null) {
-            if (im != null) {
-                try {
-                    im.javaClass.getMethod("removeUniqueIdAssociation", String::class.java).invoke(im, UHID_PORT)
-                } catch (_: Throwable) {
-                }
-            }
-            uhidBoundDisplayId = Display.DEFAULT_DISPLAY
-            return displayId == Display.DEFAULT_DISPLAY
-        }
+    private fun lookupDisplayUniqueId(displayId: Int): String? {
         return try {
-            try {
-                im.javaClass.getMethod("removeUniqueIdAssociation", String::class.java).invoke(im, UHID_PORT)
-            } catch (_: Throwable) {
-            }
-            im.javaClass.getMethod("addUniqueIdAssociation", String::class.java, String::class.java)
-                .invoke(im, UHID_PORT, displayUniqueId)
-            uhidBoundDisplayId = displayId
-            true
+            val sm = Class.forName("android.os.ServiceManager")
+            val binder = sm.getMethod("getService", String::class.java).invoke(null, "display") as? IBinder ?: return null
+            val stub = Class.forName("android.hardware.display.IDisplayManager\$Stub")
+            val dm = stub.getMethod("asInterface", IBinder::class.java).invoke(null, binder) ?: return null
+            val info = dm.javaClass.getMethod("getDisplayInfo", Int::class.javaPrimitiveType).invoke(dm, displayId) ?: return null
+            info.javaClass.getField("uniqueId").get(info) as? String
         } catch (_: Throwable) {
-            uhidBoundDisplayId = Display.DEFAULT_DISPLAY
-            false
+            null
         }
     }
 
-    override fun grantOverlayPermission(packageName: String): Boolean {
-        return try {
-            val p = Runtime.getRuntime().exec(arrayOf("appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow"))
-            p.waitFor() == 0
-        } catch (_: Throwable) {
-            false
+    private fun removeAssociation(im: Any) {
+        for (name in listOf("removeUniqueIdAssociationByPort", "removeUniqueIdAssociation")) {
+            try {
+                im.javaClass.getMethod(name, String::class.java).invoke(im, UHID_PORT)
+                return
+            } catch (_: Throwable) {
+            }
         }
+    }
+
+    override fun bindUhidDisplay(displayId: Int, displayUniqueId: String?): Boolean {
+        val im = inputManager
+        val prevBound = uhidBoundDisplayId
+        if (displayId == Display.DEFAULT_DISPLAY || im == null) {
+            if (im != null) removeAssociation(im)
+            uhidBoundDisplayId = Display.DEFAULT_DISPLAY
+            lastBindInfo = "D0"
+            if (prevBound != Display.DEFAULT_DISPLAY && uhidActive) recreateUhid()
+            return displayId == Display.DEFAULT_DISPLAY
+        }
+        val uid = displayUniqueId?.takeIf { it.isNotBlank() } ?: lookupDisplayUniqueId(displayId)
+        if (uid.isNullOrBlank()) {
+            uhidBoundDisplayId = Display.DEFAULT_DISPLAY
+            lastBindInfo = "sin_uniqueId"
+            return false
+        }
+        var lastErr: String? = null
+        removeAssociation(im)
+        for (name in listOf("addUniqueIdAssociationByPort", "addUniqueIdAssociation")) {
+            try {
+                im.javaClass.getMethod(name, String::class.java, String::class.java).invoke(im, UHID_PORT, uid)
+                uhidBoundDisplayId = displayId
+                lastBindInfo = "D$displayId"
+                if (prevBound != displayId && uhidActive) recreateUhid()
+                return true
+            } catch (t: Throwable) {
+                val root = t.cause ?: t
+                lastErr = root.javaClass.simpleName + ":" + (root.message ?: "")
+            }
+        }
+        uhidBoundDisplayId = Display.DEFAULT_DISPLAY
+        lastBindInfo = lastErr ?: "no_assoc"
+        return false
+    }
+
+    override fun grantOverlayPermission(packageName: String): Boolean {
+        val cmds = listOf(
+            arrayOf("cmd", "appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow"),
+            arrayOf("appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow")
+        )
+        for (cmd in cmds) {
+            try {
+                if (Runtime.getRuntime().exec(cmd).waitFor() == 0) return true
+            } catch (_: Throwable) {
+            }
+        }
+        return false
     }
 
     override fun moveMouse(dx: Int, dy: Int): Boolean {
@@ -375,7 +442,7 @@ class ShizukuInputService : IShizukuInput.Stub() {
             0x81.toByte(), 0x02,
             0x95.toByte(), 0x01,
             0x75, 0x05,
-            0x81.toByte(), 0x01,
+            0x81.toByte(), 0x03,
             0x05, 0x01,
             0x09, 0x30,
             0x09, 0x31,

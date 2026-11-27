@@ -16,6 +16,7 @@ class HybridController(private val wifi: WifiController, private val bt: BtHidCo
     val displayCount: Int get() = wifi.displayCount
     val activeDisplayIndex: Int get() = wifi.activeDisplayIndex
     val secondaryOverlayBlocked: Boolean get() = wifi.secondaryOverlayBlocked
+    val displayNote: String get() = wifi.displayNote
 
     fun selectDisplay(index: Int) = wifi.selectDisplay(index)
     fun hideMouse() = wifi.hideMouse()

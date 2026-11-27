@@ -81,6 +81,7 @@ fun RemoteScreen(
     displayCount: Int = 1,
     activeDisplayIndex: Int = 0,
     secondaryOverlayBlocked: Boolean = false,
+    displayNote: String = "",
     onSelectDisplay: (Int) -> Unit = {},
     onHideMouse: () -> Unit = {},
     onKeyboard: () -> Unit,
@@ -210,10 +211,15 @@ fun RemoteScreen(
                     }
                     if (secondaryOverlayBlocked) {
                         Text(
-                            "Activa \"Mouse en segunda pantalla\" (Mostrar sobre otras apps) en el receptor para ver el puntero en scrcpy.",
+                            if (displayNote.isNotEmpty())
+                                "No se pudo dibujar el puntero en scrcpy ($displayNote). Activa \"Mostrar sobre otras apps\" en el receptor."
+                            else
+                                "Activa \"Mouse en segunda pantalla\" (Mostrar sobre otras apps) en el receptor para ver el puntero en scrcpy.",
                             color = Color(0xFFF5C451),
                             fontSize = 11.sp
                         )
+                    } else if (displayCount > 1 && displayNote.isNotEmpty()) {
+                        Text(displayNote, color = Color.Gray, fontSize = 11.sp, maxLines = 1)
                     }
                     TouchpadArea(controller, settings, Modifier.weight(1f).fillMaxWidth())
                 }

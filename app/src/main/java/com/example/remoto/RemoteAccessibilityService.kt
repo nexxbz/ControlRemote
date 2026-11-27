@@ -78,6 +78,8 @@ class RemoteAccessibilityService : AccessibilityService() {
     private val pushExec = Executors.newSingleThreadExecutor()
     private var displayListener: DisplayManager.DisplayListener? = null
     private var secondaryOverlayBlocked = false
+    private var lastOverlayError = ""
+    private var manualDisplaySelected = false
     private var lastKnownDisplayCount = 1
     private var cursor: CursorView? = null
     private var cursorLp: WindowManager.LayoutParams? = null
@@ -158,16 +160,33 @@ class RemoteAccessibilityService : AccessibilityService() {
     private fun registerDisplayListener() {
         val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
         val listener = object : DisplayManager.DisplayListener {
-            override fun onDisplayAdded(displayId: Int) { notifyDisplayState() }
+            override fun onDisplayAdded(displayId: Int) {
+                if (displayId != Display.DEFAULT_DISPLAY && !manualDisplaySelected) {
+                    val target = allDisplays().firstOrNull { it.displayId == displayId }
+                    if (target != null) {
+                        switchActiveDisplay(target, recenter = true)
+                        if (ShizukuBridge.isUhidReadyFor(target.displayId)) {
+                            hideOverlayKeepActive()
+                        } else if (cursorActive) {
+                            showCursor()
+                        }
+                    }
+                }
+                notifyDisplayState()
+            }
             override fun onDisplayRemoved(displayId: Int) {
                 if (shizukuTouchDragging && dragDisplayId == displayId) {
                     shizukuTouchDragging = false
                 }
                 if (activeDisplayId == displayId) {
                     activeDisplayId = Display.DEFAULT_DISPLAY
+                    manualDisplaySelected = false
                     secondaryOverlayBlocked = false
+                    lastOverlayError = ""
                     removeCursor()
-                    ShizukuBridge.tryBindDisplay(Display.DEFAULT_DISPLAY, null)
+                    ShizukuBridge.tryBindDisplay(Display.DEFAULT_DISPLAY, null) {
+                        notifyDisplayState()
+                    }
                 }
                 notifyDisplayState()
             }
@@ -185,7 +204,17 @@ class RemoteAccessibilityService : AccessibilityService() {
         val count = displays.size.coerceAtLeast(1)
         val idx = displays.indexOfFirst { it.displayId == activeDisplayId }.let { if (it >= 0) it else 0 }
         val blocked = if (secondaryOverlayBlocked) 1 else 0
-        return "DISPLAYS:$count|$idx|$blocked\n"
+        val note = when {
+            secondaryOverlayBlocked && lastOverlayError.isNotEmpty() -> lastOverlayError.replace("|", " ").replace("\n", " ").take(80)
+            count > 1 && activeDisplayId != Display.DEFAULT_DISPLAY -> {
+                if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) "Mouse real (UHID) en Pantalla ${idx + 1}"
+                else if (ShizukuBridge.isReady()) "Puntero + Shizuku en Pantalla ${idx + 1}"
+                else "Puntero (Accesibilidad) en Pantalla ${idx + 1}"
+            }
+            count > 1 -> if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) "Mouse real (UHID) en Tel" else "Puntero en Tel"
+            else -> ""
+        }
+        return "DISPLAYS:$count|$idx|$blocked|$note\n"
     }
 
     private fun notifyDisplayState() {
@@ -1012,6 +1041,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                 if (activeDisplayId == id && boundToTarget && ShizukuBridge.isUhidReadyFor(id)) {
                     hideOverlayKeepActive()
                 }
+                notifyDisplayState()
             }
         }
     }
@@ -1020,6 +1050,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         val displays = allDisplays()
         if (displays.isEmpty()) return
         val target = displays[index.coerceIn(0, displays.lastIndex)]
+        manualDisplaySelected = true
         switchActiveDisplay(target, recenter = target.displayId != activeDisplayId)
         lastPointerMove = System.currentTimeMillis()
         if (ShizukuBridge.isUhidReadyFor(target.displayId)) {
@@ -1043,19 +1074,17 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
             if (displayCtx != null) {
                 // En pantallas virtuales (scrcpy --new-display), TYPE_APPLICATION_OVERLAY es el más fiable en Android 10-14
-                if (Settings.canDrawOverlays(this)) {
-                    if (Build.VERSION.SDK_INT >= 30) {
-                        try {
-                            val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
-                            winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                                attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
-                            }
-                        } catch (_: Exception) {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
                         }
+                    } catch (_: Exception) {
                     }
-                    displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                        attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
-                    }
+                }
+                displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                    attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
                 }
                 if (Build.VERSION.SDK_INT >= 30) {
                     try {
@@ -1072,6 +1101,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
         }
 
+        var lastErr = ""
         for ((wm, ctx, type) in attempts) {
             val view = CursorView(ctx)
             val params = WindowManager.LayoutParams(
@@ -1092,10 +1122,13 @@ class RemoteAccessibilityService : AccessibilityService() {
                 cursorLp = params
                 cursorWm = wm
                 cursorDisplayId = display.displayId
+                lastOverlayError = ""
                 return true
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                lastErr = "${e.javaClass.simpleName}: ${e.message ?: ""}"
             }
         }
+        lastOverlayError = lastErr
         return false
     }
 
