@@ -161,28 +161,15 @@ class RemoteAccessibilityService : AccessibilityService() {
         val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
         val listener = object : DisplayManager.DisplayListener {
             override fun onDisplayAdded(displayId: Int) {
-                if (displayId != Display.DEFAULT_DISPLAY && !manualDisplaySelected) {
-                    val target = allDisplays().firstOrNull { it.displayId == displayId }
-                    if (target != null) {
-                        switchActiveDisplay(target, recenter = true)
-                        showCursor()
-                    }
-                }
                 notifyDisplayState()
             }
             override fun onDisplayRemoved(displayId: Int) {
-                if (shizukuTouchDragging && dragDisplayId == displayId) {
-                    shizukuTouchDragging = false
-                }
                 if (activeDisplayId == displayId) {
                     activeDisplayId = Display.DEFAULT_DISPLAY
                     manualDisplaySelected = false
                     secondaryOverlayBlocked = false
                     lastOverlayError = ""
                     removeCursor()
-                    ShizukuBridge.tryBindDisplay(Display.DEFAULT_DISPLAY, null) {
-                        notifyDisplayState()
-                    }
                 }
                 notifyDisplayState()
             }
@@ -202,10 +189,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         val blocked = if (secondaryOverlayBlocked) 1 else 0
         val note = when {
             secondaryOverlayBlocked && lastOverlayError.isNotEmpty() -> lastOverlayError.replace("|", " ").replace("\n", " ").take(80)
-            count > 1 && activeDisplayId != Display.DEFAULT_DISPLAY -> {
-                if (ShizukuBridge.isReady()) "Puntero + Shizuku en Pantalla ${idx + 1}"
-                else "Puntero (Accesibilidad) en Pantalla ${idx + 1}"
-            }
+            count > 1 && activeDisplayId != Display.DEFAULT_DISPLAY -> "Puntero en Pantalla ${idx + 1}"
             count > 1 -> if (useKernelUhid()) "Mouse real (UHID) en Tel" else "Puntero en Tel"
             else -> ""
         }
@@ -1004,14 +988,6 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun displayUniqueId(display: Display): String? {
-        return try {
-            Display::class.java.getMethod("getUniqueId").invoke(display) as? String
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
     private fun useKernelUhid(displayId: Int = activeDisplayId): Boolean =
         displayId == Display.DEFAULT_DISPLAY && ShizukuBridge.isUhidReady()
 
@@ -1061,26 +1037,9 @@ class RemoteAccessibilityService : AccessibilityService() {
                 null
             }
             if (displayCtx != null) {
-                // En pantallas virtuales (scrcpy --new-display), TYPE_APPLICATION_OVERLAY es el más fiable en Android 10-14
-                if (Build.VERSION.SDK_INT >= 30) {
-                    try {
-                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
-                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
-                        }
-                    } catch (_: Exception) {
-                    }
-                }
-                displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                    attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
-                }
-                if (Build.VERSION.SDK_INT >= 30) {
-                    try {
-                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
-                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
-                        }
-                    } catch (_: Exception) {
+                if (Settings.canDrawOverlays(this)) {
+                    displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                        attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
                     }
                 }
                 displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
@@ -1159,7 +1118,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         val size = activeDisplaySize()
         val nx = cx + dx
         val ny = cy + dy
-        val anyDragging = uhidDragging || shizukuTouchDragging || dragStroke != null
+        val anyDragging = uhidDragging || dragStroke != null
 
         if (!anyDragging && displays.size > 1) {
             val idx = displays.indexOfFirst { it.displayId == activeDisplayId }
@@ -1211,9 +1170,7 @@ class RemoteAccessibilityService : AccessibilityService() {
 
         showCursor()
         if (displayChanged) notifyDisplayState()
-        if (shizukuTouchDragging) {
-            ShizukuBridge.drag(dragDisplayId, cx, cy, 1)
-        } else if (dragStroke != null) {
+        if (dragStroke != null) {
             dragPump()
         }
     }
@@ -1228,20 +1185,12 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var dragLastY = 0f
     private var dragDisplayId = Display.DEFAULT_DISPLAY
     private var uhidDragging = false
-    private var shizukuTouchDragging = false
 
     private fun dragStart() {
         if (useKernelUhid(activeDisplayId)) {
             uhidDragging = true
             dragDisplayId = activeDisplayId
             ShizukuBridge.drag(activeDisplayId, cx, cy, 0)
-            return
-        }
-        if (activeDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.isReady()) {
-            shizukuTouchDragging = true
-            dragDisplayId = activeDisplayId
-            ShizukuBridge.drag(dragDisplayId, cx, cy, 0)
-            showCursor()
             return
         }
         if (dragStroke != null) return
@@ -1279,11 +1228,6 @@ class RemoteAccessibilityService : AccessibilityService() {
     private fun dragEnd() {
         if (uhidDragging) {
             uhidDragging = false
-            ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
-            return
-        }
-        if (shizukuTouchDragging) {
-            shizukuTouchDragging = false
             ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
             return
         }
@@ -1337,10 +1281,6 @@ class RemoteAccessibilityService : AccessibilityService() {
             ShizukuBridge.click(activeDisplayId, cx, cy, hold)
             return
         }
-        if (activeDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.click(activeDisplayId, cx, cy, hold)) {
-            showCursor()
-            return
-        }
         val path = Path()
         path.moveTo(cx, cy)
         gesture(path, if (hold) 700L else 60L)
@@ -1351,10 +1291,6 @@ class RemoteAccessibilityService : AccessibilityService() {
         if (amount == 0) return
         if (useKernelUhid(activeDisplayId)) {
             ShizukuBridge.scroll(activeDisplayId, cx, cy, amount.toFloat())
-            return
-        }
-        if (activeDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.scroll(activeDisplayId, cx, cy, amount.toFloat())) {
-            showCursor()
             return
         }
         val s = activeDisplaySize()
@@ -1410,10 +1346,6 @@ class RemoteAccessibilityService : AccessibilityService() {
     private fun hideCursorNow() {
         if (uhidDragging) {
             uhidDragging = false
-            ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
-        }
-        if (shizukuTouchDragging) {
-            shizukuTouchDragging = false
             ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
         }
         main.removeCallbacks(hideCursor)

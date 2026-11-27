@@ -3,8 +3,6 @@ package com.example.remoto;
 interface IShizukuInput {
     boolean isUhidActive();
     String getStatusDetail();
-    int getUhidBoundDisplayId();
-    boolean bindUhidDisplay(int displayId, String displayUniqueId);
     boolean grantOverlayPermission(String packageName);
     boolean moveMouse(int dx, int dy);
     boolean clickMouse(int displayId, float x, float y, boolean right);
