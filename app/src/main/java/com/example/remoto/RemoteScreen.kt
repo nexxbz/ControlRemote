@@ -1,8 +1,15 @@
 package com.example.remoto
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -27,10 +34,13 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 /** Teclas del control. Se envían por wifi como texto con su nombre (por ejemplo "K:VOL_UP"). */
@@ -188,8 +198,37 @@ private fun DPad(size: Dp, controller: RemoteController) {
 
 @Composable
 private fun ArrowBtn(modifier: Modifier, size: Dp, icon: ImageVector, onClick: () -> Unit) {
+    val currentOnClick by rememberUpdatedState(onClick)
+    val interaction = remember { MutableInteractionSource() }
+    val indication = LocalIndication.current
+    val scope = rememberCoroutineScope()
     Box(
-        modifier.size(size * 0.28f).clip(CircleShape).clickable { onClick() },
+        modifier
+            .size(size * 0.28f)
+            .clip(CircleShape)
+            .indication(interaction, indication)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val press = PressInteraction.Press(down.position)
+                    interaction.tryEmit(press)
+                    currentOnClick()
+                    val job = scope.launch {
+                        delay(350L)
+                        while (true) {
+                            currentOnClick()
+                            delay(110L)
+                        }
+                    }
+                    val up = waitForUpOrCancellation()
+                    job.cancel()
+                    if (up != null) {
+                        interaction.tryEmit(PressInteraction.Release(press))
+                    } else {
+                        interaction.tryEmit(PressInteraction.Cancel(press))
+                    }
+                }
+            },
         contentAlignment = Alignment.Center
     ) { Icon(icon, null, tint = Ico, modifier = Modifier.size(size * 0.22f)) }
 }

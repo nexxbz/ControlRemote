@@ -7,9 +7,11 @@ import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.media.AudioManager
 import android.net.nsd.NsdManager
 import android.net.wifi.WifiManager
@@ -21,6 +23,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Display
 import android.view.Gravity
 import android.view.InputDevice
 import android.view.KeyCharacterMap
@@ -70,6 +73,9 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var regListener: NsdManager.RegistrationListener? = null
     private var cursor: CursorView? = null
     private var cursorLp: WindowManager.LayoutParams? = null
+    private var cursorWm: WindowManager? = null
+    private var activeDisplayId: Int = Display.DEFAULT_DISPLAY
+    private var cursorDisplayId: Int = Display.DEFAULT_DISPLAY
     private var cx = 0f
     private var cy = 0f
     private var cursorActive = false
@@ -820,27 +826,154 @@ class RemoteAccessibilityService : AccessibilityService() {
         node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
     }
 
-    // ---------- Gestos y cursor ----------
+    // ---------- Gestos y cursor (multipantalla para scrcpy --new-display) ----------
 
-    private fun gesture(path: Path, duration: Long) {
-        val g = GestureDescription.Builder()
+    private fun allDisplays(): List<Display> {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return emptyList()
+        val all = dm.displays.filter { it.isValid }.sortedBy { it.displayId }
+        val active = all.filter { it.state != Display.STATE_OFF }
+        return active.ifEmpty { all }
+    }
+
+    private fun displaySize(display: Display): Point {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                val wm = createDisplayContext(display).getSystemService(WindowManager::class.java)
+                if (wm != null) {
+                    val b = wm.currentWindowMetrics.bounds
+                    if (b.width() > 0 && b.height() > 0) return Point(b.width(), b.height())
+                }
+            } catch (_: Exception) {
+            }
+        }
+        val p = Point()
+        @Suppress("DEPRECATION")
+        display.getRealSize(p)
+        if (p.x <= 0 || p.y <= 0) {
+            val m = resources.displayMetrics
+            return Point(m.widthPixels.coerceAtLeast(1), m.heightPixels.coerceAtLeast(1))
+        }
+        return p
+    }
+
+    private fun activeDisplay(): Display? {
+        val displays = allDisplays()
+        return displays.firstOrNull { it.displayId == activeDisplayId }
+            ?: displays.firstOrNull { it.displayId == Display.DEFAULT_DISPLAY }
+            ?: displays.firstOrNull()
+    }
+
+    private fun activeDisplaySize(): Point {
+        val d = activeDisplay() ?: return resources.displayMetrics.let { Point(it.widthPixels, it.heightPixels) }
+        if (d.displayId != activeDisplayId) activeDisplayId = d.displayId
+        return displaySize(d)
+    }
+
+    private fun focusedDisplayId(): Int? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        return try {
+            val map = windowsOnAllDisplays
+            for (i in 0 until map.size()) {
+                val dId = map.keyAt(i)
+                if (map.valueAt(i).any { it.isFocused }) return dId
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun windowManagerAndContextForDisplay(display: Display): Pair<WindowManager, Context> {
+        if (display.displayId == Display.DEFAULT_DISPLAY) {
+            return (getSystemService(Context.WINDOW_SERVICE) as WindowManager) to this
+        }
+        val displayCtx = try {
+            createDisplayContext(display)
+        } catch (_: Exception) {
+            return (getSystemService(Context.WINDOW_SERVICE) as WindowManager) to this
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+                val wm = winCtx.getSystemService(WindowManager::class.java)
+                if (wm != null) return wm to winCtx
+            } catch (_: Exception) {
+            }
+        }
+        val wm = displayCtx.getSystemService(WindowManager::class.java)
+            ?: (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+        return wm to displayCtx
+    }
+
+    private fun gesture(path: Path, duration: Long, displayId: Int = activeDisplayId) {
+        val b = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
-            .build()
-        dispatchGesture(g, null, null)
+        if (Build.VERSION.SDK_INT >= 30) {
+            b.setDisplayId(displayId)
+        }
+        dispatchGesture(b.build(), null, null)
     }
 
     private fun swipe(fx1: Float, fy1: Float, fx2: Float, fy2: Float) {
-        val m = resources.displayMetrics
+        val s = activeDisplaySize()
         val path = Path()
-        path.moveTo(fx1 * m.widthPixels, fy1 * m.heightPixels)
-        path.lineTo(fx2 * m.widthPixels, fy2 * m.heightPixels)
+        path.moveTo(fx1 * s.x, fy1 * s.y)
+        path.lineTo(fx2 * s.x, fy2 * s.y)
         gesture(path, 250)
     }
 
     private fun moveCursor(dx: Int, dy: Int) {
-        val m = resources.displayMetrics
-        cx = (cx + dx).coerceIn(0f, m.widthPixels.toFloat())
-        cy = (cy + dy).coerceIn(0f, m.heightPixels.toFloat())
+        val displays = allDisplays()
+        if (!cursorActive && displays.isNotEmpty()) {
+            val targetId = focusedDisplayId()?.takeIf { id -> displays.any { it.displayId == id } }
+                ?: displays.firstOrNull { it.displayId == activeDisplayId }?.displayId
+                ?: displays[0].displayId
+            if (targetId != activeDisplayId) {
+                activeDisplayId = targetId
+                val p = displaySize(displays.first { it.displayId == targetId })
+                cx = p.x / 2f
+                cy = p.y / 2f
+            }
+        } else if (displays.isNotEmpty() && displays.none { it.displayId == activeDisplayId }) {
+            activeDisplayId = displays[0].displayId
+            val p = displaySize(displays[0])
+            cx = p.x / 2f
+            cy = p.y / 2f
+        }
+
+        val size = activeDisplaySize()
+        val nx = cx + dx
+        val ny = cy + dy
+
+        if (dragStroke == null && displays.size > 1) {
+            val idx = displays.indexOfFirst { it.displayId == activeDisplayId }
+            if (idx >= 0) {
+                if (nx > size.x.toFloat() && dx > 0 && idx + 1 < displays.size) {
+                    val next = displays[idx + 1]
+                    val nextSize = displaySize(next)
+                    val yRatio = (ny / size.y.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    activeDisplayId = next.displayId
+                    cx = (nx - size.x.toFloat()).coerceIn(0f, nextSize.x.toFloat())
+                    cy = (yRatio * nextSize.y.toFloat()).coerceIn(0f, nextSize.y.toFloat())
+                    lastPointerMove = System.currentTimeMillis()
+                    showCursor()
+                    return
+                } else if (nx < 0f && dx < 0 && idx - 1 >= 0) {
+                    val prev = displays[idx - 1]
+                    val prevSize = displaySize(prev)
+                    val yRatio = (ny / size.y.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    activeDisplayId = prev.displayId
+                    cx = (prevSize.x.toFloat() + nx).coerceIn(0f, prevSize.x.toFloat())
+                    cy = (yRatio * prevSize.y.toFloat()).coerceIn(0f, prevSize.y.toFloat())
+                    lastPointerMove = System.currentTimeMillis()
+                    showCursor()
+                    return
+                }
+            }
+        }
+
+        cx = nx.coerceIn(0f, size.x.toFloat())
+        cy = ny.coerceIn(0f, size.y.toFloat())
         lastPointerMove = System.currentTimeMillis()
         showCursor()
         if (dragStroke != null) dragPump()
@@ -854,19 +987,23 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var dragEndRequested = false
     private var dragLastX = 0f
     private var dragLastY = 0f
+    private var dragDisplayId = Display.DEFAULT_DISPLAY
 
     private fun dragStart() {
         if (dragStroke != null) return
         dragLastX = cx
         dragLastY = cy
+        dragDisplayId = activeDisplayId
         dragEndRequested = false
         val path = Path()
         path.moveTo(cx, cy)
         val stroke = GestureDescription.StrokeDescription(path, 0L, 1L, true)
         dragStroke = stroke
         dragBusy = true
+        val b = GestureDescription.Builder().addStroke(stroke)
+        if (Build.VERSION.SDK_INT >= 30) b.setDisplayId(dragDisplayId)
         val ok = dispatchGesture(
-            GestureDescription.Builder().addStroke(stroke).build(),
+            b.build(),
             object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     main.post { dragBusy = false; dragPump() }
@@ -909,8 +1046,10 @@ class RemoteAccessibilityService : AccessibilityService() {
             dragStroke = next
         }
         dragBusy = true
+        val b = GestureDescription.Builder().addStroke(next)
+        if (Build.VERSION.SDK_INT >= 30) b.setDisplayId(dragDisplayId)
         val ok = dispatchGesture(
-            GestureDescription.Builder().addStroke(next).build(),
+            b.build(),
             object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     main.post { dragBusy = false; dragPump() }
@@ -938,9 +1077,9 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     private fun scrollAtCursor(amount: Int) {
         if (amount == 0) return
-        val m = resources.displayMetrics
+        val s = activeDisplaySize()
         val dist = 150f * amount
-        val y2 = (cy + dist).coerceIn(0f, m.heightPixels.toFloat())
+        val y2 = (cy + dist).coerceIn(0f, s.y.toFloat())
         val path = Path()
         path.moveTo(cx, cy)
         path.lineTo(cx, y2)
@@ -949,16 +1088,22 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun showCursor() {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val density = resources.displayMetrics.density
-        val curW = (22 * density).toInt()
-        val curH = (34 * density).toInt()
+        val display = activeDisplay()
+        val targetDisplayId = display?.displayId ?: Display.DEFAULT_DISPLAY
+        if (targetDisplayId != cursorDisplayId) {
+            removeCursor()
+        }
+        val (wm, ctx) = if (display != null) {
+            windowManagerAndContextForDisplay(display)
+        } else {
+            (getSystemService(Context.WINDOW_SERVICE) as WindowManager) to this
+        }
         val x = cx.toInt()
         val y = cy.toInt()
         val existing = cursor
         val lp = cursorLp
         if (existing == null || lp == null) {
-            val view = CursorView(this)
+            val view = CursorView(ctx)
             val params = WindowManager.LayoutParams(
                 view.prefW, view.prefH,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -975,15 +1120,16 @@ class RemoteAccessibilityService : AccessibilityService() {
                 wm.addView(view, params)
                 cursor = view
                 cursorLp = params
-            } catch (e: Exception) {
-                return
+                cursorWm = wm
+                cursorDisplayId = targetDisplayId
+            } catch (_: Exception) {
             }
         } else {
             lp.x = x
             lp.y = y
             try {
-                wm.updateViewLayout(existing, lp)
-            } catch (e: Exception) {
+                (cursorWm ?: wm).updateViewLayout(existing, lp)
+            } catch (_: Exception) {
             }
         }
         cursor?.visibility = View.VISIBLE
@@ -993,13 +1139,17 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun removeCursor() {
-        val view = cursor ?: return
-        try {
-            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(view)
-        } catch (e: Exception) {
-        }
+        val view = cursor
         cursor = null
         cursorLp = null
+        val wm = cursorWm ?: (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+        cursorWm = null
+        if (view != null) {
+            try {
+                wm.removeView(view)
+            } catch (_: Exception) {
+            }
+        }
     }
 }
 
