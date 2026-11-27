@@ -220,7 +220,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         when (name) {
             "HOME" -> performGlobalAction(GLOBAL_ACTION_HOME)
             "BACK" -> performGlobalAction(GLOBAL_ACTION_BACK)
-            "MENU" -> performGlobalAction(GLOBAL_ACTION_RECENTS)
+            "MENU" -> if (!sendPcKey(KeyEvent.KEYCODE_MENU)) performGlobalAction(GLOBAL_ACTION_RECENTS)
             "SETTINGS" -> performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
             "POWER" -> power()
             "VOL_UP" -> volume(AudioManager.ADJUST_RAISE)
@@ -233,7 +233,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             "FORWARD" -> media(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
             "BRIGHT_UP" -> brightness(1)
             "BRIGHT_DOWN" -> brightness(-1)
-            "OK" -> if (!sendPcKey(KeyEvent.KEYCODE_ENTER)) dpad(4)
+            "OK" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_CENTER)) dpad(4)
             "UP" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_UP)) dpad(0)
             "DOWN" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_DOWN)) dpad(1)
             "LEFT" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_LEFT)) dpad(2)
