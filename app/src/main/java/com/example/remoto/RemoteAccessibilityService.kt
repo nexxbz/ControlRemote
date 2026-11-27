@@ -123,6 +123,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
         regListener = null
         main.removeCallbacksAndMessages(mediaFallbackToken)
+        main.removeCallbacksAndMessages(focusRecoverToken)
         main.post {
             removeCursor()
             removeRing()
@@ -234,10 +235,10 @@ class RemoteAccessibilityService : AccessibilityService() {
             "BRIGHT_UP" -> brightness(1)
             "BRIGHT_DOWN" -> brightness(-1)
             "OK" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_CENTER)) dpad(4)
-            "UP" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_UP)) dpad(0)
-            "DOWN" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_DOWN)) dpad(1)
-            "LEFT" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_LEFT)) dpad(2)
-            "RIGHT" -> if (!sendPcKey(KeyEvent.KEYCODE_DPAD_RIGHT)) dpad(3)
+            "UP" -> arrow(0, KeyEvent.KEYCODE_DPAD_UP)
+            "DOWN" -> arrow(1, KeyEvent.KEYCODE_DPAD_DOWN)
+            "LEFT" -> arrow(2, KeyEvent.KEYCODE_DPAD_LEFT)
+            "RIGHT" -> arrow(3, KeyEvent.KEYCODE_DPAD_RIGHT)
             "STOP" -> media(KeyEvent.KEYCODE_MEDIA_STOP)
             "PREV" -> media(KeyEvent.KEYCODE_MEDIA_PREVIOUS)
             "NEXT" -> media(KeyEvent.KEYCODE_MEDIA_NEXT)
@@ -247,6 +248,64 @@ class RemoteAccessibilityService : AccessibilityService() {
             "ENTER" -> if (!sendPcKey(KeyEvent.KEYCODE_ENTER)) enter()
             else -> if (name.length == 2 && name[0] == 'N' && name[1].isDigit()) typeText(name.substring(1))
         }
+    }
+
+    private val focusRecoverToken = Any()
+
+    private fun arrow(dir: Int, keyCode: Int) {
+        main.removeCallbacksAndMessages(focusRecoverToken)
+        if (!sendPcKey(keyCode)) {
+            dpad(dir)
+            return
+        }
+        main.postAtTime({
+            recoverFocusIfLost(dir)
+        }, focusRecoverToken, SystemClock.uptimeMillis() + 120L)
+    }
+
+    private fun recoverFocusIfLost(dir: Int) {
+        val root = rootInActiveWindow ?: return
+        if (root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) != null) return
+        val all = ArrayList<Cand>()
+        collect(root, all, 0)
+        val focusables = all.filter { it.node.isFocusable && it.node.isVisibleToUser }
+        if (focusables.isEmpty()) return
+        val direction = when (dir) {
+            0 -> View.FOCUS_UP
+            1 -> View.FOCUS_DOWN
+            2 -> View.FOCUS_LEFT
+            else -> View.FOCUS_RIGHT
+        }
+        val selected = focusables.firstOrNull { it.node.isSelected }
+        if (selected != null) {
+            val next = selected.node.focusSearch(direction)
+            if (next != null && next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+            val sx = selected.rect.exactCenterX()
+            val sy = selected.rect.exactCenterY()
+            val geometric = focusables
+                .filter { it !== selected }
+                .mapNotNull { c ->
+                    val dx = c.rect.exactCenterX() - sx
+                    val dy = c.rect.exactCenterY() - sy
+                    val primary = when (dir) {
+                        0 -> -dy
+                        1 -> dy
+                        2 -> -dx
+                        else -> dx
+                    }
+                    if (primary <= 4f) null
+                    else {
+                        val perp = if (dir < 2) abs(dx) else abs(dy)
+                        c to (primary + 2f * perp)
+                    }
+                }
+                .minByOrNull { it.second }
+                ?.first
+            if (geometric != null && geometric.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+            if (selected.node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) return
+        }
+        val fallback = focusables.minWithOrNull(compareBy<Cand>({ it.rect.top / 40 }, { it.rect.left }))?.node
+        fallback?.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
     }
 
     private fun sendPcKey(keyCode: Int): Boolean {
@@ -438,8 +497,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         // Borde de la lista: se desplaza como lo haría la app
         val r = Rect()
         current.getBoundsInScreen(r)
-        scrollForDirection(root, r, dir)
-        return true
+        return scrollForDirection(root, r, dir)
     }
 
     private fun moveVirtual(dir: Int, retry: Boolean) {

@@ -3,6 +3,8 @@ package com.example.remoto
 import android.content.ComponentName
 import android.content.Context
 import android.inputmethodservice.InputMethodService
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.InputDevice
@@ -17,6 +19,9 @@ import android.view.inputmethod.InputMethodManager
  */
 class RemoteKeyboardService : InputMethodService() {
 
+    private val main = Handler(Looper.getMainLooper())
+    private var pendingUp: Runnable? = null
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -28,6 +33,8 @@ class RemoteKeyboardService : InputMethodService() {
     }
 
     override fun onDestroy() {
+        pendingUp?.let { main.removeCallbacks(it) }
+        pendingUp = null
         if (instance === this) instance = null
         super.onDestroy()
     }
@@ -38,10 +45,22 @@ class RemoteKeyboardService : InputMethodService() {
 
     override fun onShowInputRequested(flags: Int, configChange: Boolean): Boolean = false
 
-    override fun onCreateInputView(): View? = null
+    override fun onCreateInputView(): View = View(this).apply { visibility = View.GONE }
 
     fun sendPcKey(keyCode: Int): Boolean {
         val ic = currentInputConnection ?: return false
+        pendingUp?.let {
+            main.removeCallbacks(it)
+            it.run()
+        }
+        val source = when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT,
+            KeyEvent.KEYCODE_DPAD_RIGHT,
+            KeyEvent.KEYCODE_DPAD_CENTER -> InputDevice.SOURCE_KEYBOARD or InputDevice.SOURCE_DPAD
+            else -> InputDevice.SOURCE_KEYBOARD
+        }
         val downTime = SystemClock.uptimeMillis()
         val down = KeyEvent(
             downTime,
@@ -53,23 +72,29 @@ class RemoteKeyboardService : InputMethodService() {
             KeyCharacterMap.VIRTUAL_KEYBOARD,
             0,
             0,
-            InputDevice.SOURCE_KEYBOARD
+            source
         )
-        val up = KeyEvent(
-            downTime,
-            SystemClock.uptimeMillis(),
-            KeyEvent.ACTION_UP,
-            keyCode,
-            0,
-            0,
-            KeyCharacterMap.VIRTUAL_KEYBOARD,
-            0,
-            0,
-            InputDevice.SOURCE_KEYBOARD
-        )
-        val sentDown = ic.sendKeyEvent(down)
-        val sentUp = ic.sendKeyEvent(up)
-        return sentDown || sentUp
+        if (!ic.sendKeyEvent(down)) return false
+        val upRunnable = Runnable {
+            pendingUp = null
+            val targetIc = currentInputConnection ?: ic
+            val up = KeyEvent(
+                downTime,
+                SystemClock.uptimeMillis(),
+                KeyEvent.ACTION_UP,
+                keyCode,
+                0,
+                0,
+                KeyCharacterMap.VIRTUAL_KEYBOARD,
+                0,
+                0,
+                source
+            )
+            targetIc.sendKeyEvent(up)
+        }
+        pendingUp = upRunnable
+        main.postDelayed(upRunnable, 20L)
+        return true
     }
 
     companion object {
