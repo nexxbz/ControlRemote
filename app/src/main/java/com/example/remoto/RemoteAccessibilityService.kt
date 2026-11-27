@@ -165,11 +165,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                     val target = allDisplays().firstOrNull { it.displayId == displayId }
                     if (target != null) {
                         switchActiveDisplay(target, recenter = true)
-                        if (ShizukuBridge.isUhidReadyFor(target.displayId)) {
-                            hideOverlayKeepActive()
-                        } else if (cursorActive) {
-                            showCursor()
-                        }
+                        showCursor()
                     }
                 }
                 notifyDisplayState()
@@ -207,11 +203,10 @@ class RemoteAccessibilityService : AccessibilityService() {
         val note = when {
             secondaryOverlayBlocked && lastOverlayError.isNotEmpty() -> lastOverlayError.replace("|", " ").replace("\n", " ").take(80)
             count > 1 && activeDisplayId != Display.DEFAULT_DISPLAY -> {
-                if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) "Mouse real (UHID) en Pantalla ${idx + 1}"
-                else if (ShizukuBridge.isReady()) "Puntero + Shizuku en Pantalla ${idx + 1}"
+                if (ShizukuBridge.isReady()) "Puntero + Shizuku en Pantalla ${idx + 1}"
                 else "Puntero (Accesibilidad) en Pantalla ${idx + 1}"
             }
-            count > 1 -> if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) "Mouse real (UHID) en Tel" else "Puntero en Tel"
+            count > 1 -> if (useKernelUhid()) "Mouse real (UHID) en Tel" else "Puntero en Tel"
             else -> ""
         }
         return "DISPLAYS:$count|$idx|$blocked|$note\n"
@@ -1017,6 +1012,9 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun useKernelUhid(displayId: Int = activeDisplayId): Boolean =
+        displayId == Display.DEFAULT_DISPLAY && ShizukuBridge.isUhidReady()
+
     private fun hideOverlayKeepActive() {
         main.removeCallbacks(hideCursor)
         cursor?.visibility = View.GONE
@@ -1028,21 +1026,11 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun switchActiveDisplay(target: Display, recenter: Boolean) {
-        val changed = target.displayId != activeDisplayId
         activeDisplayId = target.displayId
         if (recenter) {
             val p = displaySize(target)
             cx = p.x / 2f
             cy = p.y / 2f
-        }
-        if (changed) {
-            val id = target.displayId
-            ShizukuBridge.tryBindDisplay(id, displayUniqueId(target)) { boundToTarget ->
-                if (activeDisplayId == id && boundToTarget && ShizukuBridge.isUhidReadyFor(id)) {
-                    hideOverlayKeepActive()
-                }
-                notifyDisplayState()
-            }
         }
     }
 
@@ -1053,7 +1041,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         manualDisplaySelected = true
         switchActiveDisplay(target, recenter = target.displayId != activeDisplayId)
         lastPointerMove = System.currentTimeMillis()
-        if (ShizukuBridge.isUhidReadyFor(target.displayId)) {
+        if (useKernelUhid(target.displayId)) {
             hideOverlayKeepActive()
         } else {
             showCursor()
@@ -1184,7 +1172,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                     cx = (nx - size.x.toFloat()).coerceIn(0f, nextSize.x.toFloat())
                     cy = (yRatio * nextSize.y.toFloat()).coerceIn(0f, nextSize.y.toFloat())
                     lastPointerMove = System.currentTimeMillis()
-                    if (ShizukuBridge.isUhidReadyFor(next.displayId)) {
+                    if (useKernelUhid(next.displayId)) {
                         hideOverlayKeepActive()
                     } else {
                         showCursor()
@@ -1199,7 +1187,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                     cx = (prevSize.x.toFloat() + nx).coerceIn(0f, prevSize.x.toFloat())
                     cy = (yRatio * prevSize.y.toFloat()).coerceIn(0f, prevSize.y.toFloat())
                     lastPointerMove = System.currentTimeMillis()
-                    if (ShizukuBridge.isUhidReadyFor(prev.displayId)) {
+                    if (useKernelUhid(prev.displayId)) {
                         hideOverlayKeepActive()
                     } else {
                         showCursor()
@@ -1214,7 +1202,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         cy = ny.coerceIn(0f, size.y.toFloat())
         lastPointerMove = System.currentTimeMillis()
 
-        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
+        if (useKernelUhid(activeDisplayId)) {
             hideOverlayKeepActive()
             ShizukuBridge.moveUhid(dx, dy)
             if (displayChanged) notifyDisplayState()
@@ -1243,7 +1231,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var shizukuTouchDragging = false
 
     private fun dragStart() {
-        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
+        if (useKernelUhid(activeDisplayId)) {
             uhidDragging = true
             dragDisplayId = activeDisplayId
             ShizukuBridge.drag(activeDisplayId, cx, cy, 0)
@@ -1345,7 +1333,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun clickAtCursor(hold: Boolean) {
-        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
+        if (useKernelUhid(activeDisplayId)) {
             ShizukuBridge.click(activeDisplayId, cx, cy, hold)
             return
         }
@@ -1361,7 +1349,7 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     private fun scrollAtCursor(amount: Int) {
         if (amount == 0) return
-        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
+        if (useKernelUhid(activeDisplayId)) {
             ShizukuBridge.scroll(activeDisplayId, cx, cy, amount.toFloat())
             return
         }
@@ -1468,8 +1456,10 @@ private fun loadSystemPointer(): android.graphics.drawable.Drawable? {
 /** Puntero de ratón: usa la imagen original del sistema; si no está disponible dibuja una flecha igual. */
 class CursorView(context: Context) : View(context) {
     private val system: android.graphics.drawable.Drawable? = loadSystemPointer()
-    val prefW: Int = system?.intrinsicWidth?.takeIf { it > 0 } ?: (22 * context.resources.displayMetrics.density).toInt()
-    val prefH: Int = system?.intrinsicHeight?.takeIf { it > 0 } ?: (34 * context.resources.displayMetrics.density).toInt()
+    private val minW = (22 * context.resources.displayMetrics.density).toInt().coerceAtLeast(22)
+    private val minH = (34 * context.resources.displayMetrics.density).toInt().coerceAtLeast(34)
+    val prefW: Int = maxOf(system?.intrinsicWidth ?: 0, minW)
+    val prefH: Int = maxOf(system?.intrinsicHeight ?: 0, minH)
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt()

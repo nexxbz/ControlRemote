@@ -217,6 +217,7 @@ object ShizukuBridge {
     }
 
     fun isReady(): Boolean = service != null && connected
+    fun isUhidReady(): Boolean = service != null && connected && uhidActive
     fun isUhidReadyFor(displayId: Int): Boolean = service != null && connected && uhidActive && uhidBoundDisplayId == displayId
 
     fun tryBindDisplay(displayId: Int, displayUniqueId: String?, onComplete: ((Boolean) -> Unit)? = null) {
