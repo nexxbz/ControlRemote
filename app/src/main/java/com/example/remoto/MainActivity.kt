@@ -100,6 +100,7 @@ fun App(
     var showKeyboard by remember { mutableStateOf(false) }
     var update by remember { mutableStateOf<UpdateInfo?>(null) }
     var progress by remember { mutableStateOf<Int?>(null) }
+    var signatureMismatchApk by remember { mutableStateOf<java.io.File?>(null) }
     var autoTried by remember { mutableStateOf(false) }
     var showBt by remember { mutableStateOf(false) }
     var btGranted by remember {
@@ -358,7 +359,9 @@ fun App(
                                 val apk = Updater.download(context, u) { progress = it }
                                 progress = null
                                 update = null
-                                if (!Updater.install(context, apk)) {
+                                if (!Updater.hasMatchingSignature(context, apk)) {
+                                    signatureMismatchApk = apk
+                                } else if (!Updater.install(context, apk)) {
                                     Toast.makeText(
                                         context,
                                         "Permite instalar desde esta app y vuelve a abrirla para actualizar.",
@@ -367,7 +370,11 @@ fun App(
                                 }
                             } catch (e: Exception) {
                                 progress = null
-                                Toast.makeText(context, "No se pudo descargar la actualización.", Toast.LENGTH_LONG).show()
+                                Toast.makeText(
+                                    context,
+                                    "No se pudo descargar la actualización: ${e.message ?: "error de red"}",
+                                    Toast.LENGTH_LONG
+                                ).show()
                             }
                         }
                     }) { Text("Aceptar") }
@@ -382,5 +389,29 @@ fun App(
                 confirmButton = {}
             )
         }
+    }
+
+    val mismatchFile = signatureMismatchApk
+    if (mismatchFile != null) {
+        AlertDialog(
+            onDismissRequest = { signatureMismatchApk = null },
+            title = { Text("Firma distinta") },
+            text = {
+                Text(
+                    "La actualización se descargó bien, pero fue firmada con otra clave distinta a la de esta app instalada " +
+                        "(ocurre si falta el archivo app/debug.keystore original en el repositorio). " +
+                        "Android no permite actualizar encima con distinta firma: desinstala esta versión e instala la nueva manualmente."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { signatureMismatchApk = null }) { Text("Entendido") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    signatureMismatchApk = null
+                    Updater.install(context, mismatchFile)
+                }) { Text("Intentar instalar") }
+            }
+        )
     }
 }

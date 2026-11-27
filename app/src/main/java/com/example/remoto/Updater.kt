@@ -2,13 +2,14 @@ package com.example.remoto
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -60,13 +61,24 @@ object Updater {
     suspend fun download(context: Context, info: UpdateInfo, onProgress: (Int) -> Unit): File =
         withContext(Dispatchers.IO) {
             val dir = File(context.cacheDir, "updates").apply { mkdirs() }
+            val tmp = File(dir, "update.apk.tmp")
             val out = File(dir, "update.apk")
+            if (tmp.exists()) tmp.delete()
+
             val conn = URL(info.apkUrl).openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", "ControlRemote")
             conn.connectTimeout = 15000
             conn.readTimeout = 15000
+
+            val status = conn.responseCode
+            if (status !in 200..299) {
+                throw IOException("Error HTTP $status")
+            }
+
             val total = conn.contentLengthLong
             conn.inputStream.use { input ->
-                out.outputStream().use { output ->
+                tmp.outputStream().use { output ->
                     val buf = ByteArray(16 * 1024)
                     var read = 0L
                     while (true) {
@@ -78,9 +90,49 @@ object Updater {
                     }
                 }
             }
-            if (out.length() < 100_000) throw java.io.IOException("Descarga incompleta")
+            if (tmp.length() < 100_000 || !isValidZipHeader(tmp)) {
+                tmp.delete()
+                throw IOException("Descarga incompleta o inválida")
+            }
+            @Suppress("DEPRECATION")
+            val archive = context.packageManager.getPackageArchiveInfo(
+                tmp.absolutePath,
+                PackageManager.GET_SIGNING_CERTIFICATES
+            )
+            if (archive == null) {
+                tmp.delete()
+                throw IOException("El APK descargado está dañado")
+            }
+            if (out.exists()) out.delete()
+            if (!tmp.renameTo(out)) {
+                tmp.copyTo(out, overwrite = true)
+                tmp.delete()
+            }
             out
         }
+
+    private fun isValidZipHeader(file: File): Boolean = try {
+        file.inputStream().use { it.read() == 0x50 && it.read() == 0x4B }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Devuelve false si el APK descargado tiene una firma distinta a la app instalada (Android no deja actualizar encima). */
+    fun hasMatchingSignature(context: Context, apk: File): Boolean = try {
+        val pm = context.packageManager
+        val installedInfo = pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        val archiveInfo = pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
+        val installedSigs = installedInfo.signingInfo?.let {
+            it.signingCertificateHistory ?: it.apkContentsSigners
+        }
+        val archiveSigs = archiveInfo?.signingInfo?.let {
+            it.signingCertificateHistory ?: it.apkContentsSigners
+        }
+        if (installedSigs.isNullOrEmpty() || archiveSigs.isNullOrEmpty()) true
+        else installedSigs.any { a -> archiveSigs.any { b -> a == b } }
+    } catch (e: Exception) {
+        true
+    }
 
     /** Devuelve false si primero hay que permitir "instalar apps desconocidas" para esta app. */
     fun install(context: Context, apk: File): Boolean {
