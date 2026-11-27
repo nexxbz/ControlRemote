@@ -1,5 +1,6 @@
 package com.example.remoto
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -16,12 +17,21 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.abs
 
 /** Teclas del control. Se envían por wifi como texto con su nombre (por ejemplo "K:VOL_UP"). */
 enum class Key {
@@ -59,6 +69,7 @@ fun RemoteScreen(
     controller: RemoteController,
     settings: AppSettings,
     onKeyboard: () -> Unit,
+    onBluetooth: () -> Unit,
     onDevices: () -> Unit,
     onDisconnect: () -> Unit
 ) {
@@ -110,6 +121,9 @@ fun RemoteScreen(
                 Box {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, null, tint = Ico, modifier = Modifier.size(28.dp)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        if (settings.btMode) {
+                            DropdownMenuItem(text = { Text("Ratón y teclas por Bluetooth") }, onClick = { menu = false; onBluetooth() })
+                        }
                         DropdownMenuItem(text = { Text("Dispositivos") }, onClick = { menu = false; onDevices() })
                         DropdownMenuItem(text = { Text("Desconectar") }, onClick = { menu = false; onDisconnect() })
                     }
@@ -117,15 +131,7 @@ fun RemoteScreen(
             }
 
             // Reproducción
-            Row(
-                Modifier.width(rowW.dp).height(c).clip(RoundedCornerShape(50)).background(Btn),
-                horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconKey(Icons.Filled.FastRewind, c) { controller.send(Key.REWIND) }
-                IconKey(Icons.Filled.PlayArrow, c) { controller.send(Key.PLAY) }
-                IconKey(Icons.Filled.Pause, c) { controller.send(Key.PAUSE) }
-                IconKey(Icons.Filled.FastForward, c) { controller.send(Key.FORWARD) }
-            }
+            MediaPill((rowW).dp, c, controller)
 
             // Volumen | mute, números | CC, más | brillo
             Row(horizontalArrangement = Arrangement.spacedBy(g)) {
@@ -209,3 +215,76 @@ private fun Pill(width: Dp, height: Dp, top: ImageVector, bottom: ImageVector, o
             Icon(bottom, null, tint = Ico, modifier = Modifier.size(width * 0.45f))
         }
     }
+
+/** Píldora de reproducción con los íconos redondeados del control original. */
+@Composable
+private fun MediaPill(width: Dp, height: Dp, controller: RemoteController) {
+    Box(Modifier.width(width).height(height).clip(RoundedCornerShape(50)).background(Btn)) {
+        Canvas(Modifier.matchParentSize()) {
+            val u = size.height / 223f
+            val cx = size.width / 2f
+            val cy = size.height / 2f
+            drawSkip(Offset(size.width * 0.133f, cy), u, false)
+            drawSkip(Offset(size.width * 0.864f, cy), u, true)
+
+            // Play: triángulo con esquinas redondeadas
+            val pc = Offset(cx - 61f * u, cy)
+            roundedTriangle(
+                Offset(pc.x - 28.5f * u, pc.y - 36f * u),
+                Offset(pc.x - 28.5f * u, pc.y + 36f * u),
+                Offset(pc.x + 28.5f * u, pc.y),
+                7f * u, Ico
+            )
+
+            // Pausa: dos barras redondeadas
+            val bc = Offset(cx + 56f * u, cy)
+            drawRoundRect(Ico, Offset(bc.x - 33f * u, bc.y - 39f * u), Size(22f * u, 78f * u), CornerRadius(11f * u))
+            drawRoundRect(Ico, Offset(bc.x + 11f * u, bc.y - 39f * u), Size(22f * u, 78f * u), CornerRadius(11f * u))
+        }
+        Row(Modifier.matchParentSize()) {
+            Box(Modifier.weight(30f).fillMaxHeight().clickable { controller.send(Key.REWIND) })
+            Box(Modifier.weight(20f).fillMaxHeight().clickable { controller.send(Key.PLAY) })
+            Box(Modifier.weight(20f).fillMaxHeight().clickable { controller.send(Key.PAUSE) })
+            Box(Modifier.weight(30f).fillMaxHeight().clickable { controller.send(Key.FORWARD) })
+        }
+    }
+}
+
+/** Retroceder / adelantar: dos triángulos redondeados juntos. */
+private fun DrawScope.drawSkip(center: Offset, u: Float, forward: Boolean) {
+    val dir = if (forward) 1f else -1f
+    val tips = if (forward) listOf(-2f, 46f) else listOf(-47f, 3f)
+    for (t in tips) {
+        val tip = Offset(center.x + t * u, center.y)
+        val baseX = tip.x - dir * 45f * u
+        roundedTriangle(
+            tip,
+            Offset(baseX, center.y - 29f * u),
+            Offset(baseX, center.y + 29f * u),
+            5f * u, Ico
+        )
+    }
+}
+
+/** Triángulo con las esquinas redondeadas: se reduce hacia su centro y se rellena con un borde redondo. */
+private fun DrawScope.roundedTriangle(a: Offset, b: Offset, c: Offset, r: Float, color: Color) {
+    val la = (b - c).getDistance()
+    val lb = (a - c).getDistance()
+    val lc = (a - b).getDistance()
+    val per = la + lb + lc
+    val inc = Offset((la * a.x + lb * b.x + lc * c.x) / per, (la * a.y + lb * b.y + lc * c.y) / per)
+    val area = abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) / 2f
+    val rho = 2f * area / per
+    val k = ((rho - r) / rho).coerceIn(0.1f, 1f)
+    fun sc(p: Offset) = Offset(inc.x + (p.x - inc.x) * k, inc.y + (p.y - inc.y) * k)
+    val pa = sc(a)
+    val pb = sc(b)
+    val pc = sc(c)
+    val path = Path()
+    path.moveTo(pa.x, pa.y)
+    path.lineTo(pb.x, pb.y)
+    path.lineTo(pc.x, pc.y)
+    path.close()
+    drawPath(path, color)
+    drawPath(path, color, style = Stroke(width = 2f * r, join = StrokeJoin.Round, cap = StrokeCap.Round))
+}

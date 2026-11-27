@@ -70,6 +70,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var cx = 0f
     private var cy = 0f
     private var cursorActive = false
+    private var lastPointerMove = 0L
     private var ring: RingView? = null
     private var ringLp: WindowManager.LayoutParams? = null
     private var ringBounds: Rect? = null
@@ -444,15 +445,32 @@ class RemoteAccessibilityService : AccessibilityService() {
             gesture(path, 60)
             return
         }
-        // Sin recuadro: se pulsa el elemento con foco, o el cursor si se acaba de usar el panel táctil
+        // Sin recuadro: se usa el elemento con foco
         val root = rootInActiveWindow
-        var n: AccessibilityNodeInfo? = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             ?: root?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-        while (n != null) {
-            if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
-            n = n.parent
+        if (focused != null) {
+            if (focused.isEditable) {
+                enter()
+                return
+            }
+            var n: AccessibilityNodeInfo? = focused
+            while (n != null) {
+                if (n.isClickable && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+                n = n.parent
+            }
+            // No es "clicable" (apps de TV con su propia tecla OK): se toca en su centro
+            val bounds = Rect()
+            focused.getBoundsInScreen(bounds)
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                val path = Path()
+                path.moveTo(bounds.exactCenterX(), bounds.exactCenterY())
+                gesture(path, 60)
+                return
+            }
         }
-        if (cursorActive) clickAtCursor(false)
+        // Sin foco: si se acaba de usar el panel táctil, OK hace clic donde está el cursor
+        if (System.currentTimeMillis() - lastPointerMove < 60000L) clickAtCursor(false)
     }
 
     private fun showRing(r: Rect) {
@@ -604,6 +622,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         val m = resources.displayMetrics
         cx = (cx + dx).coerceIn(0f, m.widthPixels.toFloat())
         cy = (cy + dy).coerceIn(0f, m.heightPixels.toFloat())
+        lastPointerMove = System.currentTimeMillis()
         showCursor()
         if (dragStroke != null) dragPump()
     }
@@ -797,6 +816,10 @@ class CursorView(context: Context) : View(context) {
         strokeWidth = 3f
         strokeJoin = Paint.Join.ROUND
     }
+    private val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x66000000
+        style = Paint.Style.FILL
+    }
 
     override fun onDraw(canvas: Canvas) {
         val sys = system
@@ -816,6 +839,10 @@ class CursorView(context: Context) : View(context) {
         p.lineTo(w * 0.45f, h * 0.57f)
         p.lineTo(w * 0.82f, h * 0.57f)
         p.close()
+        canvas.save()
+        canvas.translate(2f, 3f)
+        canvas.drawPath(p, shadow)
+        canvas.restore()
         canvas.drawPath(p, fill)
         canvas.drawPath(p, edge)
     }

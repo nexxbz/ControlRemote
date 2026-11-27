@@ -63,6 +63,13 @@ fun SettingsScreen(settings: AppSettings, version: String, onCheckUpdate: () -> 
             settings.updateClearAfterSend(it)
         }
 
+        Section("Bluetooth")
+        SwitchRow(
+            "Mostrar el modo Bluetooth (ratón y teclas reales)",
+            "Usa el mismo Bluetooth que un mando de juegos: si lo conectas, el mando puede desconectarse. Apagado por defecto.",
+            settings.btMode
+        ) { settings.updateBtMode(it) }
+
         Section("Acerca de")
         Text("Versión $version", color = Ico, fontSize = 16.sp)
         OutlinedButton(onClick = onCheckUpdate) { Text("Buscar actualización") }

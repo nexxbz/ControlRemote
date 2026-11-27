@@ -1,8 +1,12 @@
 package com.example.remoto
 
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -10,30 +14,37 @@ import android.view.KeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var controller: WifiController
+    private lateinit var bt: BtHidController
+    private lateinit var hybrid: HybridController
     private lateinit var settings: AppSettings
     private var remoteVisible = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         controller = WifiController()
+        bt = BtHidController(applicationContext)
+        hybrid = HybridController(controller, bt)
         settings = AppSettings(this)
         val prefs = getSharedPreferences("ajustes", Context.MODE_PRIVATE)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                App(prefs, controller, settings) { remoteVisible = it }
+                App(prefs, controller, bt, hybrid, settings) { remoteVisible = it }
             }
         }
     }
@@ -42,11 +53,11 @@ class MainActivity : ComponentActivity() {
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (remoteVisible && settings.volumeKeys) {
             if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                controller.send(Key.VOL_UP)
+                hybrid.send(Key.VOL_UP)
                 return true
             }
             if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                controller.send(Key.VOL_DOWN)
+                hybrid.send(Key.VOL_DOWN)
                 return true
             }
         }
@@ -55,6 +66,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         controller.stop()
+        bt.stop()
         super.onDestroy()
     }
 }
@@ -65,6 +77,8 @@ private enum class Screen { DEVICES, REMOTE, RECEIVER, SETTINGS }
 fun App(
     prefs: SharedPreferences,
     controller: WifiController,
+    bt: BtHidController,
+    hybrid: HybridController,
     settings: AppSettings,
     onRemoteVisible: (Boolean) -> Unit
 ) {
@@ -84,6 +98,24 @@ fun App(
     var update by remember { mutableStateOf<UpdateInfo?>(null) }
     var progress by remember { mutableStateOf<Int?>(null) }
     var autoTried by remember { mutableStateOf(false) }
+    var showBt by remember { mutableStateOf(false) }
+    var btGranted by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < 31 ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val btLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        btGranted = result[Manifest.permission.BLUETOOTH_CONNECT] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+    }
+    fun requestBt() {
+        if (Build.VERSION.SDK_INT >= 31) {
+            btLauncher.launch(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_ADVERTISE))
+        }
+    }
+    // El modo Bluetooth solo se inicia cuando se abre su ventana
+    LaunchedEffect(showBt, btGranted) { if (showBt && btGranted) bt.start() }
 
     LaunchedEffect(screen) { onRemoteVisible(screen == Screen.REMOTE) }
 
@@ -177,12 +209,16 @@ fun App(
             BackHandler { screen = Screen.DEVICES }
             RemoteScreen(
                 deviceName = selectedName ?: "Control",
-                status = controller.status,
-                controller = controller,
+                status = hybrid.statusText,
+                controller = hybrid,
                 settings = settings,
                 onKeyboard = { showKeyboard = true },
+                onBluetooth = {
+                    showBt = true
+                    if (!btGranted) requestBt()
+                },
                 onDevices = { screen = Screen.DEVICES },
-                onDisconnect = { controller.disconnect(); screen = Screen.DEVICES }
+                onDisconnect = { controller.disconnect(); bt.disconnect(); screen = Screen.DEVICES }
             )
         }
         Screen.RECEIVER -> {
@@ -245,7 +281,26 @@ fun App(
         )
     }
 
-    if (showKeyboard) KeyboardSheet(controller, settings.clearAfterSend) { showKeyboard = false }
+    if (showKeyboard) KeyboardSheet(hybrid, settings.clearAfterSend) { showKeyboard = false }
+
+    if (showBt) {
+        BluetoothDialog(
+            bt = bt,
+            hasPermission = btGranted,
+            onRequestPermission = { requestBt() },
+            onVisible = {
+                val i = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
+                    .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
+                try {
+                    context.startActivity(i)
+                } catch (e: Exception) {
+                    context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                }
+            },
+            onBluetoothSettings = { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) },
+            onDismiss = { showBt = false }
+        )
+    }
 
     if (showHelp) {
         AlertDialog(

@@ -24,6 +24,12 @@ brillo (con permiso), escribir texto y números.
   apretar y deslizar (arrastrar). Botones de abajo: izquierdo (mantenerlo apretado y deslizar en el panel = arrastrar),
   central (clic) y derecho (mantener presionado = abrir las opciones, como al presionar la pantalla).
 
+## Modo Bluetooth opcional (ratón y teclas reales)
+Menú ⋮ del control → "Ratón y teclas por Bluetooth". Este teléfono se hace pasar por un ratón y un teclado Bluetooth
+reales: en el otro teléfono aparece el puntero del sistema y las flechas/OK/volumen/inicio/atrás son teclas verdaderas.
+Hay que emparejar primero los dos teléfonos por Bluetooth ("Hacer visible" ayuda) y cerrar otras apps de control Bluetooth.
+Las funciones que Bluetooth no cubre (encendido, brillo, captura...) siguen yendo por wifi.
+
 ## Requisitos
 - Android 9 o superior, ambos teléfonos en la misma wifi.
 - En el teléfono controlado: activar el servicio en Accesibilidad. Si Android dice "Configuración restringida",

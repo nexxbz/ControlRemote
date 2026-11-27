@@ -22,6 +22,8 @@ class AppSettings(context: Context) {
         private set
     var clearAfterSend by mutableStateOf(prefs.getBoolean("clear", true))
         private set
+    var btMode by mutableStateOf(prefs.getBoolean("btmode", false))
+        private set
 
     fun updateTouchpadDefault(v: Boolean) { touchpadDefault = v; prefs.edit().putBoolean("touchpad", v).apply() }
     fun updateVolumeKeys(v: Boolean) { volumeKeys = v; prefs.edit().putBoolean("volkeys", v).apply() }
@@ -29,4 +31,5 @@ class AppSettings(context: Context) {
     fun updateScrollSpeed(v: Float) { scrollSpeed = v; prefs.edit().putFloat("scr", v).apply() }
     fun updateInvertScroll(v: Boolean) { invertScroll = v; prefs.edit().putBoolean("inv", v).apply() }
     fun updateClearAfterSend(v: Boolean) { clearAfterSend = v; prefs.edit().putBoolean("clear", v).apply() }
+    fun updateBtMode(v: Boolean) { btMode = v; prefs.edit().putBoolean("btmode", v).apply() }
 }
