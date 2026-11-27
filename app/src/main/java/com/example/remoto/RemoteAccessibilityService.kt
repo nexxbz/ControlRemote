@@ -1031,15 +1031,32 @@ class RemoteAccessibilityService : AccessibilityService() {
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             attempts.add(Triple(wm, this, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
         } else {
+            val baseCtx = applicationContext ?: this
             val displayCtx = try {
-                createDisplayContext(display)
+                baseCtx.createDisplayContext(display)
             } catch (_: Exception) {
-                null
+                try { createDisplayContext(display) } catch (_: Exception) { null }
             }
             if (displayCtx != null) {
-                if (Settings.canDrawOverlays(this)) {
-                    displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                        attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+                displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                    attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
+                }
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
+                        }
+                    } catch (_: Exception) {
                     }
                 }
                 displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
@@ -1369,29 +1386,10 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 }
 
-/** Carga la imagen del puntero de ratón del propio sistema (si el teléfono la deja leer). */
-private fun loadSystemPointer(): android.graphics.drawable.Drawable? {
-    val res = android.content.res.Resources.getSystem()
-    for (name in listOf("pointer_arrow", "pointer_arrow_icon")) {
-        try {
-            val id = res.getIdentifier(name, "drawable", "android")
-            if (id != 0) {
-                val d = res.getDrawable(id, null)
-                if (d != null) return d
-            }
-        } catch (e: Exception) {
-        }
-    }
-    return null
-}
-
-/** Puntero de ratón: usa la imagen original del sistema; si no está disponible dibuja una flecha igual. */
+/** Puntero de ratón: flecha blanca con borde negro y sombra, siempre visible en cualquier pantalla. */
 class CursorView(context: Context) : View(context) {
-    private val system: android.graphics.drawable.Drawable? = loadSystemPointer()
-    private val minW = (22 * context.resources.displayMetrics.density).toInt().coerceAtLeast(22)
-    private val minH = (34 * context.resources.displayMetrics.density).toInt().coerceAtLeast(34)
-    val prefW: Int = maxOf(system?.intrinsicWidth ?: 0, minW)
-    val prefH: Int = maxOf(system?.intrinsicHeight ?: 0, minH)
+    val prefW: Int = (24 * context.resources.displayMetrics.density).toInt().coerceAtLeast(24)
+    val prefH: Int = (36 * context.resources.displayMetrics.density).toInt().coerceAtLeast(36)
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt()
@@ -1400,21 +1398,15 @@ class CursorView(context: Context) : View(context) {
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFF000000.toInt()
         style = Paint.Style.STROKE
-        strokeWidth = 3f
+        strokeWidth = (2f * context.resources.displayMetrics.density).coerceAtLeast(3f)
         strokeJoin = Paint.Join.ROUND
     }
     private val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0x66000000
+        color = 0x77000000
         style = Paint.Style.FILL
     }
 
     override fun onDraw(canvas: Canvas) {
-        val sys = system
-        if (sys != null) {
-            sys.setBounds(0, 0, width, height)
-            sys.draw(canvas)
-            return
-        }
         val w = width.toFloat()
         val h = height.toFloat()
         val p = Path()
