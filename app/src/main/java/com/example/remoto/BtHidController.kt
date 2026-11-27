@@ -195,6 +195,7 @@ class BtHidController(private val context: Context) : RemoteController {
         Key.MUTE -> 0xE2
         Key.PLAY -> 0xB0
         Key.PAUSE -> 0xB1
+        Key.PLAY_PAUSE -> 0xCD
         Key.STOP -> 0xB7
         Key.NEXT -> 0xB5
         Key.PREV -> 0xB6

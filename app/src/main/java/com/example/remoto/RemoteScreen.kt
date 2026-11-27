@@ -39,7 +39,7 @@ enum class Key {
     HOME, BACK, MENU, GUIDE, POWER, SETTINGS,
     VOL_UP, VOL_DOWN, MUTE, CAPTIONS,
     BRIGHT_UP, BRIGHT_DOWN,
-    REWIND, PLAY, PAUSE, FORWARD, STOP, PREV, NEXT, REPEAT, SCREENSHOT,
+    REWIND, PLAY, PAUSE, PLAY_PAUSE, FORWARD, STOP, PREV, NEXT, REPEAT, SCREENSHOT,
     RED, GREEN, BLUE, YELLOW,
     SPACE, BACKSPACE, ENTER,
     N0, N1, N2, N3, N4, N5, N6, N7, N8, N9
@@ -243,8 +243,7 @@ private fun MediaPill(width: Dp, height: Dp, controller: RemoteController) {
         }
         Row(Modifier.matchParentSize()) {
             Box(Modifier.weight(30f).fillMaxHeight().clickable { controller.send(Key.REWIND) })
-            Box(Modifier.weight(20f).fillMaxHeight().clickable { controller.send(Key.PLAY) })
-            Box(Modifier.weight(20f).fillMaxHeight().clickable { controller.send(Key.PAUSE) })
+            Box(Modifier.weight(40f).fillMaxHeight().clickable { controller.send(Key.PLAY_PAUSE) })
             Box(Modifier.weight(30f).fillMaxHeight().clickable { controller.send(Key.FORWARD) })
         }
     }

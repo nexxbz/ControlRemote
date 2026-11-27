@@ -228,6 +228,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             "MUTE" -> volume(AudioManager.ADJUST_TOGGLE_MUTE)
             "PLAY" -> playPause(true)
             "PAUSE" -> playPause(false)
+            "PLAY_PAUSE" -> togglePlayPause()
             "REWIND" -> media(KeyEvent.KEYCODE_MEDIA_REWIND)
             "FORWARD" -> media(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD)
             "BRIGHT_UP" -> brightness(1)
@@ -293,6 +294,47 @@ class RemoteAccessibilityService : AccessibilityService() {
             if (focused?.isEditable != true) {
                 sendPcKey(KeyEvent.KEYCODE_SPACE)
             }
+        }
+    }
+
+    private fun togglePlayPause() {
+        main.removeCallbacksAndMessages(mediaFallbackToken)
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val wasPlaying = am.isMusicActive
+
+        if (!sendPcKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)) {
+            amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+        }
+
+        fun scheduleIfUnchanged(delayMs: Long, action: () -> Unit) {
+            main.postAtTime({
+                if (am.isMusicActive == wasPlaying) {
+                    action()
+                }
+            }, mediaFallbackToken, SystemClock.uptimeMillis() + delayMs)
+        }
+
+        if (wasPlaying) {
+            scheduleIfUnchanged(250L) { amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) }
+            scheduleIfUnchanged(550L) {
+                if (!sendPcKey(KeyEvent.KEYCODE_MEDIA_PAUSE)) {
+                    amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PAUSE)
+                }
+            }
+            scheduleIfUnchanged(850L) { amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PAUSE) }
+            scheduleIfUnchanged(1150L) {
+                val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                if (focused?.isEditable != true) {
+                    sendPcKey(KeyEvent.KEYCODE_SPACE)
+                }
+            }
+        } else {
+            scheduleIfUnchanged(250L) {
+                if (!sendPcKey(KeyEvent.KEYCODE_MEDIA_PLAY)) {
+                    amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PLAY)
+                }
+            }
+            scheduleIfUnchanged(550L) { amDispatchMedia(KeyEvent.KEYCODE_MEDIA_PLAY) }
         }
     }
 
