@@ -1268,6 +1268,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             try {
                 cursorWm?.updateViewLayout(existing, lp)
             } catch (_: Exception) {
+                removeCursor()
             }
             if (secondaryOverlayBlocked && targetDisplayId == Display.DEFAULT_DISPLAY) {
                 secondaryOverlayBlocked = false
