@@ -78,6 +78,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private val pushExec = Executors.newSingleThreadExecutor()
     private var displayListener: DisplayManager.DisplayListener? = null
     private var secondaryOverlayBlocked = false
+    private var lastKnownDisplayCount = 1
     private var cursor: CursorView? = null
     private var cursorLp: WindowManager.LayoutParams? = null
     private var cursorWm: WindowManager? = null
@@ -915,9 +916,7 @@ class RemoteAccessibilityService : AccessibilityService() {
             } catch (_: Exception) {
             }
         }
-        val all = byId.values.sortedBy { it.displayId }
-        val active = all.filter { it.state != Display.STATE_OFF }
-        return active.ifEmpty { all }
+        return byId.values.sortedBy { it.displayId }
     }
 
     private fun displaySize(display: Display): Point {
@@ -995,18 +994,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                 null
             }
             if (displayCtx != null) {
-                displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                    attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
-                }
-                if (Build.VERSION.SDK_INT >= 30) {
-                    try {
-                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
-                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
-                        }
-                    } catch (_: Exception) {
-                    }
-                }
+                // En pantallas virtuales (scrcpy --new-display), TYPE_APPLICATION_OVERLAY es el más fiable en Android 10-14
                 if (Settings.canDrawOverlays(this)) {
                     if (Build.VERSION.SDK_INT >= 30) {
                         try {
@@ -1020,6 +1008,18 @@ class RemoteAccessibilityService : AccessibilityService() {
                     displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
                         attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
                     }
+                }
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+                displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                    attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
                 }
             }
         }
@@ -1070,11 +1070,13 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     private fun moveCursor(dx: Int, dy: Int) {
         val displays = allDisplays()
-        var displayChanged = false
+        var displayChanged = displays.size != lastKnownDisplayCount
+        lastKnownDisplayCount = displays.size
         if (!cursorActive && displays.isNotEmpty()) {
+            val activeList = displays.filter { it.state != Display.STATE_OFF }.ifEmpty { displays }
             val targetId = focusedDisplayId()?.takeIf { id -> displays.any { it.displayId == id } }
-                ?: displays.firstOrNull { it.displayId == activeDisplayId }?.displayId
-                ?: displays[0].displayId
+                ?: activeList.firstOrNull { it.displayId == activeDisplayId }?.displayId
+                ?: activeList[0].displayId
             if (targetId != activeDisplayId) {
                 activeDisplayId = targetId
                 val p = displaySize(displays.first { it.displayId == targetId })

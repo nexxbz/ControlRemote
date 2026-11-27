@@ -192,20 +192,20 @@ fun ReceiverScreen(
             }
         }
 
-        // 4. Puntero en segunda pantalla (scrcpy --new-display)
+        // 4. Mouse en segunda pantalla (scrcpy --new-display)
         StatusCard(
             icon = Icons.Filled.Layers,
-            title = "Puntero en segunda pantalla (scrcpy)",
+            title = "Mouse en segunda pantalla (scrcpy)",
             active = canDrawOverlays,
             description = if (canDrawOverlays) {
-                "Permiso concedido: la flecha del mouse se dibuja también en pantallas virtuales."
+                "Permiso concedido: el cursor del mouse se muestra también en la pantalla virtual de scrcpy."
             } else {
-                "Necesario en algunos teléfonos para mostrar la flecha del mouse en scrcpy --new-display."
+                "Permite dibujar el cursor del mouse encima de la pantalla virtual scrcpy --new-display."
             }
         ) {
             if (!canDrawOverlays) {
                 AmberOutlinedButton(
-                    text = "Permitir sobre otras apps",
+                    text = "Permitir mostrar el mouse",
                     tag = "allow_overlay_button",
                     onClick = onOpenOverlaySettings
                 )

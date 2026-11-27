@@ -207,13 +207,13 @@ fun RemoteScreen(
                                 }
                             }
                         }
-                        if (activeDisplayIndex > 0 && secondaryOverlayBlocked) {
-                            Text(
-                                "Activa \"Mostrar sobre otras apps\" en el receptor para ver la flecha en la 2ª pantalla.",
-                                color = Color(0xFFF5C451),
-                                fontSize = 11.sp
-                            )
-                        }
+                    }
+                    if (secondaryOverlayBlocked) {
+                        Text(
+                            "Activa \"Mouse en segunda pantalla\" (Mostrar sobre otras apps) en el receptor para ver el puntero en scrcpy.",
+                            color = Color(0xFFF5C451),
+                            fontSize = 11.sp
+                        )
                     }
                     TouchpadArea(controller, settings, Modifier.weight(1f).fillMaxWidth())
                 }
