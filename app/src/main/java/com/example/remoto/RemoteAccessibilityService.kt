@@ -19,8 +19,11 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
+import android.view.InputDevice
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
@@ -258,9 +261,21 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun media(code: Int) {
+        if (sendPcKey(code)) return
+        val now = SystemClock.uptimeMillis()
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
-        am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+        am.dispatchMediaKeyEvent(
+            KeyEvent(
+                now, now, KeyEvent.ACTION_DOWN, code, 0, 0,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD
+            )
+        )
+        am.dispatchMediaKeyEvent(
+            KeyEvent(
+                now, now, KeyEvent.ACTION_UP, code, 0, 0,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD
+            )
+        )
     }
 
     /** Máximo de la escala de brillo de este teléfono (muchos usan 1023, 2047 o 4095 en vez de 255). */
