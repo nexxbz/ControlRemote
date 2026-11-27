@@ -4,6 +4,7 @@ import android.os.IBinder
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
+import android.view.Display
 import android.view.InputDevice
 import android.view.InputEvent
 import android.view.KeyCharacterMap
@@ -16,10 +17,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Servicio privilegiado (UID shell / root vía Shizuku):
- * 1) Intenta crear un mouse HID real del kernel en /dev/uhid (el sistema dibuja el cursor nativo
- *    en cualquier pantalla, incluida scrcpy --new-display, sin usar Bluetooth).
- * 2) Si el kernel/SELinux bloquea /dev/uhid, inyecta eventos reales directamente con IInputManager.
+ * Servicio privilegiado vía Shizuku (UID shell / root):
+ * - Crea un mouse HID real del kernel en /dev/uhid para la pantalla principal (y secundarias si el sistema lo permite).
+ * - Concede SYSTEM_ALERT_WINDOW automáticamente para poder dibujar el puntero sobre scrcpy --new-display.
+ * - Inyecta toques, deslizamientos y teclas reales directamente con IInputManager en cualquier displayId.
  */
 @Keep
 class ShizukuInputService : IShizukuInput.Stub() {
@@ -27,8 +28,11 @@ class ShizukuInputService : IShizukuInput.Stub() {
     private var uhidFd: FileDescriptor? = null
     @Volatile
     private var uhidActive = false
+    @Volatile
+    private var uhidBoundDisplayId = Display.DEFAULT_DISPLAY
     private var uhidError: String? = null
     private var buttons = 0
+    private var dragDownTime = 0L
 
     private var inputManager: Any? = null
     private var injectMethod: Method? = null
@@ -67,7 +71,7 @@ class ShizukuInputService : IShizukuInput.Stub() {
             val ev = ByteBuffer.allocate(UHID_EVENT_SIZE).order(ByteOrder.LITTLE_ENDIAN)
             ev.putInt(UHID_CREATE2)
             putCString(ev, 4, "ControlRemoto Mouse", 128)
-            putCString(ev, 132, "controlremoto/0", 64)
+            putCString(ev, 132, UHID_PORT, 64)
             putCString(ev, 196, "", 64)
             ev.putShort(260, MOUSE_DESCRIPTOR.size.toShort())
             ev.putShort(262, BUS_USB.toShort())
@@ -146,39 +150,28 @@ class ShizukuInputService : IShizukuInput.Stub() {
         }
     }
 
-    private fun obtainMouseEvent(
+    private fun obtainTouchEvent(
         downTime: Long,
         eventTime: Long,
         action: Int,
         displayId: Int,
         x: Float,
-        y: Float,
-        buttonState: Int,
-        actionButton: Int = 0,
-        vScroll: Float = 0f
+        y: Float
     ): MotionEvent {
         val props = arrayOf(MotionEvent.PointerProperties().apply {
             id = 0
-            toolType = MotionEvent.TOOL_TYPE_MOUSE
+            toolType = MotionEvent.TOOL_TYPE_FINGER
         })
         val coords = arrayOf(MotionEvent.PointerCoords().apply {
             this.x = x
             this.y = y
-            pressure = if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) 1f else 0f
+            pressure = if (action == MotionEvent.ACTION_UP) 0f else 1f
             size = 1f
-            if (vScroll != 0f) setAxisValue(MotionEvent.AXIS_VSCROLL, vScroll)
         })
         val ev = MotionEvent.obtain(
             downTime, eventTime, action, 1, props, coords,
-            0, buttonState, 1f, 1f, 0, 0, InputDevice.SOURCE_MOUSE, 0
+            0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0
         )
-        if (actionButton != 0) {
-            try {
-                MotionEvent::class.java.getMethod("setActionButton", Int::class.javaPrimitiveType)
-                    .invoke(ev, actionButton)
-            } catch (_: Exception) {
-            }
-        }
         try {
             setDisplayIdMethod?.invoke(ev, displayId)
         } catch (_: Exception) {
@@ -192,6 +185,44 @@ class ShizukuInputService : IShizukuInput.Stub() {
         uhidActive -> "UHID_OK"
         inputManager != null -> "INJECT_OK:${uhidError ?: ""}"
         else -> "ERR:${uhidError ?: "sin acceso"}"
+    }
+
+    override fun getUhidBoundDisplayId(): Int = uhidBoundDisplayId
+
+    override fun bindUhidDisplay(displayId: Int, displayUniqueId: String?): Boolean {
+        val im = inputManager
+        if (displayId == Display.DEFAULT_DISPLAY || displayUniqueId.isNullOrBlank() || im == null) {
+            if (im != null) {
+                try {
+                    im.javaClass.getMethod("removeUniqueIdAssociation", String::class.java).invoke(im, UHID_PORT)
+                } catch (_: Throwable) {
+                }
+            }
+            uhidBoundDisplayId = Display.DEFAULT_DISPLAY
+            return displayId == Display.DEFAULT_DISPLAY
+        }
+        return try {
+            try {
+                im.javaClass.getMethod("removeUniqueIdAssociation", String::class.java).invoke(im, UHID_PORT)
+            } catch (_: Throwable) {
+            }
+            im.javaClass.getMethod("addUniqueIdAssociation", String::class.java, String::class.java)
+                .invoke(im, UHID_PORT, displayUniqueId)
+            uhidBoundDisplayId = displayId
+            true
+        } catch (_: Throwable) {
+            uhidBoundDisplayId = Display.DEFAULT_DISPLAY
+            false
+        }
+    }
+
+    override fun grantOverlayPermission(packageName: String): Boolean {
+        return try {
+            val p = Runtime.getRuntime().exec(arrayOf("appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow"))
+            p.waitFor() == 0
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     override fun moveMouse(dx: Int, dy: Int): Boolean {
@@ -210,7 +241,7 @@ class ShizukuInputService : IShizukuInput.Stub() {
     }
 
     override fun clickMouse(displayId: Int, x: Float, y: Float, right: Boolean): Boolean {
-        if (uhidActive) {
+        if (uhidActive && displayId == uhidBoundDisplayId) {
             val bit = if (right) 2 else 1
             buttons = buttons or bit
             val downOk = sendUhidReport(0, 0, 0)
@@ -220,45 +251,61 @@ class ShizukuInputService : IShizukuInput.Stub() {
             return downOk && upOk
         }
         val now = SystemClock.uptimeMillis()
-        val btn = if (right) MotionEvent.BUTTON_SECONDARY else MotionEvent.BUTTON_PRIMARY
-        val d = obtainMouseEvent(now, now, MotionEvent.ACTION_DOWN, displayId, x, y, btn)
-        val p = obtainMouseEvent(now, now, MotionEvent.ACTION_BUTTON_PRESS, displayId, x, y, btn, btn)
-        val r = obtainMouseEvent(now, now + 35, MotionEvent.ACTION_BUTTON_RELEASE, displayId, x, y, 0, btn)
-        val u = obtainMouseEvent(now, now + 35, MotionEvent.ACTION_UP, displayId, x, y, 0)
+        val holdMs = if (right) 650L else 45L
+        val d = obtainTouchEvent(now, now, MotionEvent.ACTION_DOWN, displayId, x, y)
         val ok = injectEvent(d)
-        injectEvent(p)
-        SystemClock.sleep(35)
-        injectEvent(r)
+        d.recycle()
+        SystemClock.sleep(holdMs)
+        val u = obtainTouchEvent(now, now + holdMs, MotionEvent.ACTION_UP, displayId, x, y)
         injectEvent(u)
-        d.recycle(); p.recycle(); r.recycle(); u.recycle()
+        u.recycle()
         return ok
     }
 
     override fun scrollMouse(displayId: Int, x: Float, y: Float, vScroll: Float): Boolean {
-        if (uhidActive) {
+        if (uhidActive && displayId == uhidBoundDisplayId) {
             val w = vScroll.toInt().let { if (it == 0) (if (vScroll > 0f) 1 else -1) else it }
             return sendUhidReport(0, 0, w)
         }
         val now = SystemClock.uptimeMillis()
-        val ev = obtainMouseEvent(now, now, MotionEvent.ACTION_SCROLL, displayId, x, y, 0, 0, vScroll)
-        val ok = injectEvent(ev)
-        ev.recycle()
+        val dist = 150f * vScroll
+        val steps = 8
+        val d = obtainTouchEvent(now, now, MotionEvent.ACTION_DOWN, displayId, x, y)
+        val ok = injectEvent(d)
+        d.recycle()
+        for (i in 1..steps) {
+            val t = now + i * 22L
+            val yy = (y + dist * (i.toFloat() / steps)).coerceAtLeast(0f)
+            val m = obtainTouchEvent(now, t, MotionEvent.ACTION_MOVE, displayId, x, yy)
+            injectEvent(m)
+            m.recycle()
+            SystemClock.sleep(20)
+        }
+        val endT = now + (steps + 1) * 22L
+        val u = obtainTouchEvent(now, endT, MotionEvent.ACTION_UP, displayId, x, (y + dist).coerceAtLeast(0f))
+        injectEvent(u)
+        u.recycle()
         return ok
     }
 
     override fun dragMouse(displayId: Int, x: Float, y: Float, action: Int): Boolean {
-        if (uhidActive) {
+        if (uhidActive && displayId == uhidBoundDisplayId) {
             buttons = if (action == 2) (buttons and 1.inv()) else (buttons or 1)
             return sendUhidReport(0, 0, 0)
         }
         val now = SystemClock.uptimeMillis()
+        if (action == 0 || dragDownTime == 0L) {
+            dragDownTime = now
+        }
         val motAction = when (action) {
             0 -> MotionEvent.ACTION_DOWN
             1 -> MotionEvent.ACTION_MOVE
             else -> MotionEvent.ACTION_UP
         }
-        val btn = if (action == 2) 0 else MotionEvent.BUTTON_PRIMARY
-        val ev = obtainMouseEvent(now, now, motAction, displayId, x, y, btn)
+        val ev = obtainTouchEvent(dragDownTime, now, motAction, displayId, x, y)
+        if (action == 2) {
+            dragDownTime = 0L
+        }
         val ok = injectEvent(ev)
         ev.recycle()
         return ok
@@ -281,6 +328,12 @@ class ShizukuInputService : IShizukuInput.Stub() {
 
     override fun destroy() {
         uhidActive = false
+        try {
+            inputManager?.let { im ->
+                im.javaClass.getMethod("removeUniqueIdAssociation", String::class.java).invoke(im, UHID_PORT)
+            }
+        } catch (_: Throwable) {
+        }
         val fd = uhidFd
         uhidFd = null
         if (fd != null) {
@@ -299,6 +352,7 @@ class ShizukuInputService : IShizukuInput.Stub() {
     }
 
     companion object {
+        private const val UHID_PORT = "controlremoto/0"
         private const val UHID_EVENT_SIZE = 4376
         private const val UHID_DESTROY = 1
         private const val UHID_CREATE2 = 11

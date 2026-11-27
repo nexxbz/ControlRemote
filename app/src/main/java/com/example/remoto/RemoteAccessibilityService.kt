@@ -160,10 +160,14 @@ class RemoteAccessibilityService : AccessibilityService() {
         val listener = object : DisplayManager.DisplayListener {
             override fun onDisplayAdded(displayId: Int) { notifyDisplayState() }
             override fun onDisplayRemoved(displayId: Int) {
+                if (shizukuTouchDragging && dragDisplayId == displayId) {
+                    shizukuTouchDragging = false
+                }
                 if (activeDisplayId == displayId) {
                     activeDisplayId = Display.DEFAULT_DISPLAY
                     secondaryOverlayBlocked = false
                     removeCursor()
+                    ShizukuBridge.tryBindDisplay(Display.DEFAULT_DISPLAY, null)
                 }
                 notifyDisplayState()
             }
@@ -976,18 +980,53 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun selectDisplayByIndex(index: Int) {
-        val displays = allDisplays()
-        if (displays.isEmpty()) return
-        val target = displays[index.coerceIn(0, displays.lastIndex)]
-        if (target.displayId != activeDisplayId) {
-            activeDisplayId = target.displayId
+    private fun displayUniqueId(display: Display): String? {
+        return try {
+            Display::class.java.getMethod("getUniqueId").invoke(display) as? String
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun hideOverlayKeepActive() {
+        main.removeCallbacks(hideCursor)
+        cursor?.visibility = View.GONE
+        cursorActive = true
+        if (secondaryOverlayBlocked) {
+            secondaryOverlayBlocked = false
+            notifyDisplayState()
+        }
+    }
+
+    private fun switchActiveDisplay(target: Display, recenter: Boolean) {
+        val changed = target.displayId != activeDisplayId
+        activeDisplayId = target.displayId
+        if (recenter) {
             val p = displaySize(target)
             cx = p.x / 2f
             cy = p.y / 2f
         }
+        if (changed) {
+            val id = target.displayId
+            ShizukuBridge.tryBindDisplay(id, displayUniqueId(target)) { boundToTarget ->
+                if (activeDisplayId == id && boundToTarget && ShizukuBridge.isUhidReadyFor(id)) {
+                    hideOverlayKeepActive()
+                }
+            }
+        }
+    }
+
+    private fun selectDisplayByIndex(index: Int) {
+        val displays = allDisplays()
+        if (displays.isEmpty()) return
+        val target = displays[index.coerceIn(0, displays.lastIndex)]
+        switchActiveDisplay(target, recenter = target.displayId != activeDisplayId)
         lastPointerMove = System.currentTimeMillis()
-        showCursor()
+        if (ShizukuBridge.isUhidReadyFor(target.displayId)) {
+            hideOverlayKeepActive()
+        } else {
+            showCursor()
+        }
         notifyDisplayState()
     }
 
@@ -1078,15 +1117,6 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun moveCursor(dx: Int, dy: Int) {
-        if (ShizukuBridge.isUhidReady()) {
-            hideCursorNow()
-            if (secondaryOverlayBlocked) {
-                secondaryOverlayBlocked = false
-                notifyDisplayState()
-            }
-            ShizukuBridge.moveUhid(dx, dy)
-            return
-        }
         val displays = allDisplays()
         var displayChanged = displays.size != lastKnownDisplayCount
         lastKnownDisplayCount = displays.size
@@ -1096,47 +1126,51 @@ class RemoteAccessibilityService : AccessibilityService() {
                 ?: activeList.firstOrNull { it.displayId == activeDisplayId }?.displayId
                 ?: activeList[0].displayId
             if (targetId != activeDisplayId) {
-                activeDisplayId = targetId
-                val p = displaySize(displays.first { it.displayId == targetId })
-                cx = p.x / 2f
-                cy = p.y / 2f
+                val target = displays.first { it.displayId == targetId }
+                switchActiveDisplay(target, recenter = true)
                 displayChanged = true
             }
         } else if (displays.isNotEmpty() && displays.none { it.displayId == activeDisplayId }) {
-            activeDisplayId = displays[0].displayId
-            val p = displaySize(displays[0])
-            cx = p.x / 2f
-            cy = p.y / 2f
+            switchActiveDisplay(displays[0], recenter = true)
             displayChanged = true
         }
 
         val size = activeDisplaySize()
         val nx = cx + dx
         val ny = cy + dy
+        val anyDragging = uhidDragging || shizukuTouchDragging || dragStroke != null
 
-        if (dragStroke == null && displays.size > 1) {
+        if (!anyDragging && displays.size > 1) {
             val idx = displays.indexOfFirst { it.displayId == activeDisplayId }
             if (idx >= 0) {
                 if (nx > size.x.toFloat() && dx > 0 && idx + 1 < displays.size) {
                     val next = displays[idx + 1]
                     val nextSize = displaySize(next)
                     val yRatio = (ny / size.y.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
-                    activeDisplayId = next.displayId
+                    switchActiveDisplay(next, recenter = false)
                     cx = (nx - size.x.toFloat()).coerceIn(0f, nextSize.x.toFloat())
                     cy = (yRatio * nextSize.y.toFloat()).coerceIn(0f, nextSize.y.toFloat())
                     lastPointerMove = System.currentTimeMillis()
-                    showCursor()
+                    if (ShizukuBridge.isUhidReadyFor(next.displayId)) {
+                        hideOverlayKeepActive()
+                    } else {
+                        showCursor()
+                    }
                     notifyDisplayState()
                     return
                 } else if (nx < 0f && dx < 0 && idx - 1 >= 0) {
                     val prev = displays[idx - 1]
                     val prevSize = displaySize(prev)
                     val yRatio = (ny / size.y.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
-                    activeDisplayId = prev.displayId
+                    switchActiveDisplay(prev, recenter = false)
                     cx = (prevSize.x.toFloat() + nx).coerceIn(0f, prevSize.x.toFloat())
                     cy = (yRatio * prevSize.y.toFloat()).coerceIn(0f, prevSize.y.toFloat())
                     lastPointerMove = System.currentTimeMillis()
-                    showCursor()
+                    if (ShizukuBridge.isUhidReadyFor(prev.displayId)) {
+                        hideOverlayKeepActive()
+                    } else {
+                        showCursor()
+                    }
                     notifyDisplayState()
                     return
                 }
@@ -1146,9 +1180,21 @@ class RemoteAccessibilityService : AccessibilityService() {
         cx = nx.coerceIn(0f, size.x.toFloat())
         cy = ny.coerceIn(0f, size.y.toFloat())
         lastPointerMove = System.currentTimeMillis()
+
+        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
+            hideOverlayKeepActive()
+            ShizukuBridge.moveUhid(dx, dy)
+            if (displayChanged) notifyDisplayState()
+            return
+        }
+
         showCursor()
         if (displayChanged) notifyDisplayState()
-        if (dragStroke != null) dragPump()
+        if (shizukuTouchDragging) {
+            ShizukuBridge.drag(dragDisplayId, cx, cy, 1)
+        } else if (dragStroke != null) {
+            dragPump()
+        }
     }
 
     // ---------- Apretar y deslizar (arrastrar) ----------
@@ -1161,11 +1207,20 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var dragLastY = 0f
     private var dragDisplayId = Display.DEFAULT_DISPLAY
     private var uhidDragging = false
+    private var shizukuTouchDragging = false
 
     private fun dragStart() {
-        if (ShizukuBridge.isUhidReady()) {
+        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
             uhidDragging = true
+            dragDisplayId = activeDisplayId
             ShizukuBridge.drag(activeDisplayId, cx, cy, 0)
+            return
+        }
+        if (activeDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.isReady()) {
+            shizukuTouchDragging = true
+            dragDisplayId = activeDisplayId
+            ShizukuBridge.drag(dragDisplayId, cx, cy, 0)
+            showCursor()
             return
         }
         if (dragStroke != null) return
@@ -1203,7 +1258,12 @@ class RemoteAccessibilityService : AccessibilityService() {
     private fun dragEnd() {
         if (uhidDragging) {
             uhidDragging = false
-            ShizukuBridge.drag(activeDisplayId, cx, cy, 2)
+            ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
+            return
+        }
+        if (shizukuTouchDragging) {
+            shizukuTouchDragging = false
+            ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
             return
         }
         if (dragStroke == null) return
@@ -1252,7 +1312,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun clickAtCursor(hold: Boolean) {
-        if (ShizukuBridge.isUhidReady()) {
+        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
             ShizukuBridge.click(activeDisplayId, cx, cy, hold)
             return
         }
@@ -1268,7 +1328,7 @@ class RemoteAccessibilityService : AccessibilityService() {
 
     private fun scrollAtCursor(amount: Int) {
         if (amount == 0) return
-        if (ShizukuBridge.isUhidReady()) {
+        if (ShizukuBridge.isUhidReadyFor(activeDisplayId)) {
             ShizukuBridge.scroll(activeDisplayId, cx, cy, amount.toFloat())
             return
         }
@@ -1327,6 +1387,14 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun hideCursorNow() {
+        if (uhidDragging) {
+            uhidDragging = false
+            ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
+        }
+        if (shizukuTouchDragging) {
+            shizukuTouchDragging = false
+            ShizukuBridge.drag(dragDisplayId, cx, cy, 2)
+        }
         main.removeCallbacks(hideCursor)
         cursor?.visibility = View.GONE
         cursorActive = false

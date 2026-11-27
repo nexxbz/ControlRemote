@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.view.Display
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -16,7 +17,7 @@ import java.util.concurrent.Executors
 
 /**
  * Conecta la app con Shizuku (cuando el receptor tiene Shizuku iniciado por ADB) para crear un
- * mouse HID real (/dev/uhid) o inyectar mouse/teclas del sistema sin depender del Bluetooth.
+ * mouse HID real (/dev/uhid), conceder superposición en pantallas secundarias e inyectar eventos en cualquier pantalla.
  */
 object ShizukuBridge {
     private const val REQ_CODE = 4701
@@ -30,6 +31,9 @@ object ShizukuBridge {
     var uhidActive by mutableStateOf(false)
         private set
     var statusDetail by mutableStateOf("")
+        private set
+    @Volatile
+    var uhidBoundDisplayId: Int = Display.DEFAULT_DISPLAY
         private set
 
     private val main = Handler(Looper.getMainLooper())
@@ -52,6 +56,7 @@ object ShizukuBridge {
             uhidActive = false
             statusDetail = ""
         }
+        uhidBoundDisplayId = Display.DEFAULT_DISPLAY
         service = null
         binding = false
     }
@@ -70,9 +75,15 @@ object ShizukuBridge {
             if (binder == null || !binder.pingBinder()) return
             val s = IShizukuInput.Stub.asInterface(binder)
             service = s
+            val pkg = appContext?.packageName
             io.execute {
+                if (pkg != null) {
+                    try { s.grantOverlayPermission(pkg) } catch (_: Throwable) {}
+                }
                 val uhid = try { s.isUhidActive } catch (_: Throwable) { false }
                 val detail = try { s.statusDetail ?: "" } catch (_: Throwable) { "" }
+                val boundDisp = try { s.uhidBoundDisplayId } catch (_: Throwable) { Display.DEFAULT_DISPLAY }
+                uhidBoundDisplayId = boundDisp
                 main.post {
                     connected = true
                     uhidActive = uhid
@@ -84,6 +95,7 @@ object ShizukuBridge {
         override fun onServiceDisconnected(name: ComponentName?) {
             service = null
             binding = false
+            uhidBoundDisplayId = Display.DEFAULT_DISPLAY
             main.post {
                 connected = false
                 uhidActive = false
@@ -178,7 +190,7 @@ object ShizukuBridge {
         val a = args ?: Shizuku.UserServiceArgs(ComponentName(ctx, ShizukuInputService::class.java))
             .daemon(false)
             .processNameSuffix("shizuku_input")
-            .version(1)
+            .version(2)
             .debuggable(BuildConfig.DEBUG)
             .also { args = it }
         try {
@@ -196,6 +208,7 @@ object ShizukuBridge {
         }
         service = null
         binding = false
+        uhidBoundDisplayId = Display.DEFAULT_DISPLAY
         main.post {
             connected = false
             uhidActive = false
@@ -204,7 +217,25 @@ object ShizukuBridge {
     }
 
     fun isReady(): Boolean = service != null && connected
-    fun isUhidReady(): Boolean = service != null && connected && uhidActive
+    fun isUhidReadyFor(displayId: Int): Boolean = service != null && connected && uhidActive && uhidBoundDisplayId == displayId
+
+    fun tryBindDisplay(displayId: Int, displayUniqueId: String?, onComplete: ((Boolean) -> Unit)? = null) {
+        val s = service ?: run {
+            onComplete?.let { main.post { it(false) } }
+            return
+        }
+        io.execute {
+            val ok = try {
+                s.bindUhidDisplay(displayId, displayUniqueId)
+            } catch (_: Throwable) {
+                false
+            }
+            uhidBoundDisplayId = if (ok) displayId else Display.DEFAULT_DISPLAY
+            if (onComplete != null) {
+                main.post { onComplete(ok) }
+            }
+        }
+    }
 
     fun moveUhid(dx: Int, dy: Int) {
         val s = service ?: return
