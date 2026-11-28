@@ -275,10 +275,10 @@ private fun ArrowBtn(modifier: Modifier, size: Dp, icon: ImageVector, onClick: (
                     interaction.tryEmit(press)
                     currentOnClick()
                     val job = scope.launch {
-                        delay(350L)
+                        delay(250L)
                         while (true) {
                             currentOnClick()
-                            delay(110L)
+                            delay(65L)
                         }
                     }
                     val up = waitForUpOrCancellation()
