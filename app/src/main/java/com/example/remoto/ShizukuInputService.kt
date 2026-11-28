@@ -1,11 +1,14 @@
 package com.example.remoto
 
+import android.app.Presentation
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Point
+import android.graphics.drawable.ColorDrawable
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
@@ -52,14 +55,20 @@ class ShizukuInputService : IShizukuInput.Stub() {
     private val cursorThread = HandlerThread("shizuku_cursor").apply { start() }
     private val cursorHandler = Handler(cursorThread.looper)
     private var shellCtx: Context? = null
+    private var shellPkgName: String = "com.android.shell"
     private var shellOverlayGranted = false
-    private var shellCursorView: View? = null
+    private var shellCursorView: ShellArrowView? = null
     private var shellCursorLp: WindowManager.LayoutParams? = null
     private var shellCursorWm: WindowManager? = null
+    private var shellCursorPres: Presentation? = null
     private var shellCursorDisplayId: Int = -1
+    @Volatile
     private var shellOverlayErr: String = ""
+    @Volatile
+    private var shellOverlayMethod: String = ""
     private val hideShellCursor = Runnable {
         shellCursorView?.visibility = View.GONE
+        shellCursorPres?.window?.decorView?.visibility = View.GONE
     }
 
     init {
@@ -180,7 +189,9 @@ class ShizukuInputService : IShizukuInput.Stub() {
     override fun grantOverlayPermission(packageName: String): Boolean {
         val cmds = listOf(
             arrayOf("cmd", "appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow"),
-            arrayOf("appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow")
+            arrayOf("/system/bin/cmd", "appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow"),
+            arrayOf("appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow"),
+            arrayOf("/system/bin/appops", "set", packageName, "SYSTEM_ALERT_WINDOW", "allow")
         )
         for (cmd in cmds) {
             try {
@@ -229,9 +240,21 @@ class ShizukuInputService : IShizukuInput.Stub() {
         return sendUhidReport(0, 0, 0)
     }
 
+    private fun patchOpPackageName(ctx: Context, pkg: String) {
+        try {
+            val f = ctx.javaClass.getDeclaredField("mOpPackageName")
+            f.isAccessible = true
+            f.set(ctx, pkg)
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun resolveShellContext(): Context? {
         shellCtx?.let { return it }
         return try {
+            val uid = try { Os.getuid() } catch (_: Throwable) { 2000 }
+            val targetPkg = if (uid == 0) "android" else "com.android.shell"
+            shellPkgName = targetPkg
             val atClass = Class.forName("android.app.ActivityThread")
             val at = try {
                 atClass.getMethod("currentActivityThread").invoke(null)
@@ -239,24 +262,41 @@ class ShizukuInputService : IShizukuInput.Stub() {
                 null
             } ?: atClass.getMethod("systemMain").invoke(null)
             val sysCtx = atClass.getMethod("getSystemContext").invoke(at) as? Context ?: return null
-            val ctx = sysCtx.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY)
+            val ctx = if (targetPkg == "android") {
+                sysCtx
+            } else {
+                try {
+                    val pkgCtx = sysCtx.createPackageContext(targetPkg, Context.CONTEXT_IGNORE_SECURITY)
+                    patchOpPackageName(pkgCtx, targetPkg)
+                    pkgCtx
+                } catch (_: Throwable) {
+                    sysCtx
+                }
+            }
             shellCtx = ctx
             ctx
         } catch (t: Throwable) {
-            shellOverlayErr = "ctx:${t.javaClass.simpleName}"
+            shellOverlayErr = "ctx:${t.javaClass.simpleName}:${t.message ?: ""}"
             null
         }
     }
 
     private fun removeShellCursorOnThread() {
         cursorHandler.removeCallbacks(hideShellCursor)
+        val pres = shellCursorPres
+        shellCursorPres = null
         val v = shellCursorView
         val wm = shellCursorWm
         shellCursorView = null
         shellCursorLp = null
         shellCursorWm = null
         shellCursorDisplayId = -1
-        if (v != null && wm != null) {
+        if (pres != null) {
+            try {
+                pres.dismiss()
+            } catch (_: Throwable) {
+            }
+        } else if (v != null && wm != null) {
             try {
                 wm.removeView(v)
             } catch (_: Throwable) {
@@ -269,12 +309,18 @@ class ShizukuInputService : IShizukuInput.Stub() {
             val v = shellCursorView
             val lp = shellCursorLp
             val wm = shellCursorWm
-            if (v != null && lp != null && wm != null) {
+            val pres = shellCursorPres
+            if (v != null && lp != null && (wm != null || pres != null)) {
                 lp.x = x
                 lp.y = y
                 v.visibility = View.VISIBLE
+                pres?.window?.decorView?.visibility = View.VISIBLE
                 try {
-                    wm.updateViewLayout(v, lp)
+                    if (pres != null) {
+                        pres.window?.attributes = lp
+                    } else {
+                        wm?.updateViewLayout(v, lp)
+                    }
                     v.invalidate()
                     cursorHandler.removeCallbacks(hideShellCursor)
                     cursorHandler.postDelayed(hideShellCursor, 15000L)
@@ -287,39 +333,51 @@ class ShizukuInputService : IShizukuInput.Stub() {
             removeShellCursorOnThread()
         }
 
-        if (!shellOverlayGranted) {
+        val ctx = resolveShellContext() ?: return false
+        if (shellPkgName == "com.android.shell" && !shellOverlayGranted) {
             shellOverlayGranted = grantOverlayPermission("com.android.shell")
         }
-        val ctx = resolveShellContext() ?: return false
-        val dm = ctx.getSystemService(DisplayManager::class.java) ?: return false
-        val display = dm.getDisplay(displayId) ?: return false
+        val dm = ctx.getSystemService(DisplayManager::class.java)
+        if (dm == null) {
+            shellOverlayErr = "no DisplayManager"
+            return false
+        }
+        val display = dm.getDisplay(displayId)
+        if (display == null) {
+            shellOverlayErr = "no display $displayId"
+            return false
+        }
         val sz = Point()
         @Suppress("DEPRECATION")
         display.getRealSize(sz)
         val minDim = minOf(sz.x, sz.y).coerceAtLeast(0)
 
-        val candidates = mutableListOf<Pair<WindowManager, Context>>()
+        val candidates = mutableListOf<Triple<WindowManager, Context, String>>()
         if (Build.VERSION.SDK_INT >= 31) {
             try {
                 val wCtx = ctx.createWindowContext(display, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
-                wCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(it to wCtx) }
+                patchOpPackageName(wCtx, shellPkgName)
+                wCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(Triple(it, wCtx, "ShWin")) }
             } catch (_: Throwable) {
             }
         }
         try {
             val dCtx = ctx.createDisplayContext(display)
+            patchOpPackageName(dCtx, shellPkgName)
             if (Build.VERSION.SDK_INT >= 30) {
                 try {
                     val wCtx = dCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
-                    wCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(it to wCtx) }
+                    patchOpPackageName(wCtx, shellPkgName)
+                    wCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(Triple(it, wCtx, "ShDispWin")) }
                 } catch (_: Throwable) {
                 }
             }
-            dCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(it to dCtx) }
+            dCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(Triple(it, dCtx, "ShDisp")) }
         } catch (_: Throwable) {
         }
 
-        for ((wm, vCtx) in candidates) {
+        var lastErr = ""
+        for ((wm, vCtx, tag) in candidates) {
             val view = ShellArrowView(vCtx, minDim)
             val lp = WindowManager.LayoutParams(
                 view.prefW, view.prefH,
@@ -333,21 +391,66 @@ class ShizukuInputService : IShizukuInput.Stub() {
                 gravity = Gravity.TOP or Gravity.START
                 this.x = x
                 this.y = y
+                packageName = shellPkgName
             }
             try {
                 wm.addView(view, lp)
                 shellCursorView = view
                 shellCursorLp = lp
                 shellCursorWm = wm
+                shellCursorPres = null
                 shellCursorDisplayId = displayId
+                shellOverlayMethod = tag
                 shellOverlayErr = ""
                 cursorHandler.removeCallbacks(hideShellCursor)
                 cursorHandler.postDelayed(hideShellCursor, 15000L)
                 return true
             } catch (t: Throwable) {
-                shellOverlayErr = "${t.javaClass.simpleName}:${t.message ?: ""}"
+                lastErr = "${t.javaClass.simpleName}:${t.message ?: ""}"
             }
         }
+
+        try {
+            val pres = object : Presentation(ctx, display, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen) {}
+            val view = ShellArrowView(pres.context, minDim)
+            val win = pres.window
+            if (win != null) {
+                win.setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY)
+                win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                win.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                win.addFlags(
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                )
+                win.setGravity(Gravity.TOP or Gravity.START)
+            }
+            pres.setContentView(view)
+            pres.show()
+            if (win != null) {
+                win.setLayout(view.prefW, view.prefH)
+                win.attributes = win.attributes.apply {
+                    this.x = x
+                    this.y = y
+                    packageName = shellPkgName
+                }
+            }
+            shellCursorPres = pres
+            shellCursorLp = win?.attributes
+            shellCursorView = view
+            shellCursorWm = null
+            shellCursorDisplayId = displayId
+            shellOverlayMethod = "ShPres"
+            shellOverlayErr = ""
+            cursorHandler.removeCallbacks(hideShellCursor)
+            cursorHandler.postDelayed(hideShellCursor, 15000L)
+            return true
+        } catch (t: Throwable) {
+            lastErr = "${t.javaClass.simpleName}:${t.message ?: ""}"
+        }
+
+        shellOverlayErr = lastErr.ifEmpty { "sin candidatos" }
         return false
     }
 
@@ -358,7 +461,7 @@ class ShizukuInputService : IShizukuInput.Stub() {
             try {
                 ok = showOverlayCursorOnThread(displayId, x, y)
             } catch (t: Throwable) {
-                shellOverlayErr = t.javaClass.simpleName
+                shellOverlayErr = "${t.javaClass.simpleName}:${t.message ?: ""}"
                 ok = false
             } finally {
                 latch.countDown()
@@ -376,6 +479,16 @@ class ShizukuInputService : IShizukuInput.Stub() {
         cursorHandler.post {
             cursorHandler.removeCallbacks(hideShellCursor)
             shellCursorView?.visibility = View.GONE
+            shellCursorPres?.window?.decorView?.visibility = View.GONE
+        }
+    }
+
+    override fun getOverlayStatus(): String {
+        val v = shellCursorView
+        return if (v != null) {
+            "OK:$shellOverlayMethod:d=${v.attachedDisplayId ?: -1}:dr=${v.drawCount}"
+        } else {
+            "ERR:$shellOverlayErr"
         }
     }
 
@@ -418,10 +531,17 @@ class ShizukuInputService : IShizukuInput.Stub() {
     }
 
     private class ShellArrowView(context: Context, minDim: Int) : View(context) {
+        @Volatile
+        var drawCount = 0
+            private set
+        @Volatile
+        var attachedDisplayId: Int? = null
+            private set
+
         val prefW: Int = maxOf(
-            (24 * context.resources.displayMetrics.density).toInt(),
-            (minDim * 0.025f).toInt(),
-            28
+            (28 * context.resources.displayMetrics.density).toInt(),
+            (minDim * 0.032f).toInt(),
+            36
         )
         val prefH: Int = (prefW * 1.5f).toInt()
 
@@ -432,7 +552,7 @@ class ShizukuInputService : IShizukuInput.Stub() {
         private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = 0xFF000000.toInt()
             style = Paint.Style.STROKE
-            strokeWidth = (2f * context.resources.displayMetrics.density).coerceAtLeast(3f)
+            strokeWidth = (2.5f * context.resources.displayMetrics.density).coerceAtLeast(3f)
             strokeJoin = Paint.Join.ROUND
         }
         private val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -440,8 +560,9 @@ class ShizukuInputService : IShizukuInput.Stub() {
             style = Paint.Style.FILL
         }
 
-        init {
-            setLayerType(LAYER_TYPE_SOFTWARE, null)
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            attachedDisplayId = display?.displayId
         }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -449,6 +570,7 @@ class ShizukuInputService : IShizukuInput.Stub() {
         }
 
         override fun onDraw(canvas: Canvas) {
+            drawCount++
             val w = width.toFloat()
             val h = height.toFloat()
             val p = Path()

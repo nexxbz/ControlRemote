@@ -82,6 +82,10 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var displayListener: DisplayManager.DisplayListener? = null
     private var secondaryOverlayBlocked = false
     private var lastOverlayError = ""
+    private var lastOverlayMethod = ""
+    private var shizukuOverlayStatus = ""
+    private val failedOverlayMethods = mutableMapOf<Int, MutableSet<String>>()
+    private val verifyOverlayToken = Any()
     private var manualDisplaySelected = false
     private var lastKnownDisplayCount = 1
     private var cursor: CursorView? = null
@@ -158,6 +162,7 @@ class RemoteAccessibilityService : AccessibilityService() {
         ShizukuBridge.unbind()
         main.removeCallbacksAndMessages(mediaFallbackToken)
         main.removeCallbacksAndMessages(focusRecoverToken)
+        main.removeCallbacksAndMessages(verifyOverlayToken)
         main.post {
             removeCursor()
             removeRing()
@@ -168,14 +173,18 @@ class RemoteAccessibilityService : AccessibilityService() {
         val dm = getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
         val listener = object : DisplayManager.DisplayListener {
             override fun onDisplayAdded(displayId: Int) {
+                failedOverlayMethods.remove(displayId)
                 notifyDisplayState()
             }
             override fun onDisplayRemoved(displayId: Int) {
+                failedOverlayMethods.remove(displayId)
                 if (activeDisplayId == displayId) {
                     activeDisplayId = Display.DEFAULT_DISPLAY
                     manualDisplaySelected = false
                     secondaryOverlayBlocked = false
                     lastOverlayError = ""
+                    lastOverlayMethod = ""
+                    shizukuOverlayStatus = ""
                     removeCursor()
                 }
                 notifyDisplayState()
@@ -195,9 +204,29 @@ class RemoteAccessibilityService : AccessibilityService() {
         val idx = displays.indexOfFirst { it.displayId == activeDisplayId }.let { if (it >= 0) it else 0 }
         val blocked = if (secondaryOverlayBlocked) 1 else 0
         val note = when {
-            secondaryOverlayBlocked && lastOverlayError.isNotEmpty() -> lastOverlayError.replace("|", " ").replace("\n", " ").take(80)
-            count > 1 && activeDisplayId != Display.DEFAULT_DISPLAY -> "Puntero en Pantalla ${idx + 1}"
-            count > 1 -> if (useKernelUhid()) "Mouse real (UHID) en Tel" else "Puntero en Tel"
+            secondaryOverlayBlocked && lastOverlayError.isNotEmpty() ->
+                lastOverlayError.replace("|", " ").replace("\n", " ").take(100)
+            count > 1 && activeDisplayId != Display.DEFAULT_DISPLAY -> {
+                val d = displays.getOrNull(idx)
+                val sz = d?.let { displaySize(it) }
+                val dimText = if (sz != null) "${sz.x}x${sz.y}" else ""
+                val methodText = when {
+                    shizukuOverlayActive -> shizukuOverlayStatus.ifEmpty { "Shizuku" }
+                    lastOverlayMethod.isNotEmpty() -> {
+                        val v = cursor
+                        val dr = v?.drawCount ?: 0
+                        val ad = v?.attachedDisplayId
+                        if (ad != null) "$lastOverlayMethod:d$ad:dr$dr" else lastOverlayMethod
+                    }
+                    else -> ""
+                }
+                listOf("Puntero en Pantalla ${idx + 1}", methodText, dimText)
+                    .filter { it.isNotEmpty() }
+                    .joinToString(" · ")
+                    .replace("|", " ")
+                    .take(100)
+            }
+            count > 1 -> "En Tel · Toca Pantalla 2 para ver ratón en scrcpy"
             else -> ""
         }
         return "DISPLAYS:$count|$idx|$blocked|$note\n"
@@ -1037,66 +1066,112 @@ class RemoteAccessibilityService : AccessibilityService() {
         notifyDisplayState()
     }
 
+    private data class OverlayCandidate(
+        val wm: WindowManager,
+        val ctx: Context,
+        val type: Int,
+        val tag: String
+    )
+
+    private fun scheduleVerifyOverlay(targetDisplayId: Int, tag: String) {
+        if (targetDisplayId == Display.DEFAULT_DISPLAY) return
+        main.removeCallbacksAndMessages(verifyOverlayToken)
+        main.postAtTime({
+            if (activeDisplayId != targetDisplayId || shizukuOverlayActive) return@postAtTime
+            val v = cursor ?: return@postAtTime
+            val att = v.attachedDisplayId
+            val dr = v.drawCount
+            if ((att != null && att != targetDisplayId) || dr == 0) {
+                failedOverlayMethods.getOrPut(targetDisplayId) { mutableSetOf() }.add(tag)
+                lastOverlayError = if (att != null && att != targetDisplayId) {
+                    "$tag:wrongDisp($att!=$targetDisplayId)"
+                } else {
+                    "$tag:noDraw(att=$att)"
+                }
+                removeCursor()
+                showCursor()
+            } else {
+                notifyDisplayState()
+            }
+        }, verifyOverlayToken, SystemClock.uptimeMillis() + 240L)
+    }
+
     private fun tryAddCursorView(display: Display, x: Int, y: Int): Boolean {
         val sz = displaySize(display)
         val posX = (x + 2).coerceIn(0, (sz.x - 4).coerceAtLeast(0))
         val posY = (y + 2).coerceIn(0, (sz.y - 4).coerceAtLeast(0))
-        val attempts = mutableListOf<Triple<WindowManager, Context, Int>>()
+        val failed = failedOverlayMethods[display.displayId].orEmpty()
+        val attempts = mutableListOf<OverlayCandidate>()
         if (display.displayId == Display.DEFAULT_DISPLAY) {
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            attempts.add(Triple(wm, this, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
+            attempts.add(OverlayCandidate(wm, this, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, "A11y"))
         } else {
             val appCtx = applicationContext ?: this
+            val a11yType = WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            val appType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+
+            // 1. TYPE_ACCESSIBILITY_OVERLAY primero (no requiere SYSTEM_ALERT_WINDOW y tiene capa más alta)
             if (Build.VERSION.SDK_INT >= 31) {
-                for (t in listOf(
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
-                )) {
-                    for (base in listOf(this, appCtx)) {
+                try {
+                    val winCtx = createWindowContext(display, a11yType, null)
+                    winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                        attempts.add(OverlayCandidate(wm, winCtx, a11yType, "A11yWin"))
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            try {
+                val dCtx = createDisplayContext(display)
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        val winCtx = dCtx.createWindowContext(a11yType, null)
+                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                            attempts.add(OverlayCandidate(wm, winCtx, a11yType, "A11yDispWin"))
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+                dCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                    attempts.add(OverlayCandidate(wm, dCtx, a11yType, "A11yDisp"))
+                }
+            } catch (_: Exception) {
+            }
+
+            // 2. TYPE_APPLICATION_OVERLAY con el contexto del servicio y de la app
+            if (Build.VERSION.SDK_INT >= 31) {
+                for ((baseTag, base) in listOf("AppWin" to this, "AppWinCtx" to appCtx)) {
+                    try {
+                        val winCtx = base.createWindowContext(display, appType, null)
+                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                            attempts.add(OverlayCandidate(wm, winCtx, appType, baseTag))
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+            for ((dTag, base) in listOf("AppDisp" to appCtx, "AppSvcDisp" to this)) {
+                try {
+                    val displayCtx = base.createDisplayContext(display)
+                    if (Build.VERSION.SDK_INT >= 30) {
                         try {
-                            val winCtx = base.createWindowContext(display, t, null)
+                            val winCtx = displayCtx.createWindowContext(appType, null)
                             winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                                attempts.add(Triple(wm, winCtx, t))
+                                attempts.add(OverlayCandidate(wm, winCtx, appType, "${dTag}Win"))
                             }
                         } catch (_: Exception) {
                         }
                     }
-                }
-            }
-            val displayCtxs = listOfNotNull(
-                try { appCtx.createDisplayContext(display) } catch (_: Exception) { null },
-                try { createDisplayContext(display) } catch (_: Exception) { null }
-            )
-            for (displayCtx in displayCtxs) {
-                if (Build.VERSION.SDK_INT >= 30) {
-                    try {
-                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
-                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
-                        }
-                    } catch (_: Exception) {
+                    displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                        attempts.add(OverlayCandidate(wm, displayCtx, appType, dTag))
                     }
-                }
-                displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                    attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY))
-                }
-                if (Build.VERSION.SDK_INT >= 30) {
-                    try {
-                        val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
-                        winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                            attempts.add(Triple(wm, winCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
-                        }
-                    } catch (_: Exception) {
-                    }
-                }
-                displayCtx.getSystemService(WindowManager::class.java)?.let { wm ->
-                    attempts.add(Triple(wm, displayCtx, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
+                } catch (_: Exception) {
                 }
             }
         }
 
-        var lastErr = ""
-        for ((wm, ctx, type) in attempts) {
+        var lastErr = lastOverlayError
+        for ((wm, ctx, type, tag) in attempts) {
+            if (tag in failed) continue
             val view = CursorView(ctx, sz)
             val params = WindowManager.LayoutParams(
                 view.prefW, view.prefH,
@@ -1117,23 +1192,26 @@ class RemoteAccessibilityService : AccessibilityService() {
                 cursorWm = wm
                 cursorPresentation = null
                 cursorDisplayId = display.displayId
+                lastOverlayMethod = tag
                 lastOverlayError = ""
+                scheduleVerifyOverlay(display.displayId, tag)
                 return true
             } catch (e: Exception) {
-                lastErr = "${e.javaClass.simpleName}: ${e.message ?: ""}"
+                lastErr = "$tag:${e.javaClass.simpleName}:${e.message ?: ""}"
             }
         }
 
         if (display.displayId != Display.DEFAULT_DISPLAY) {
-            val presTypes = listOf<Int?>(
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                null
+            val presTypes = listOf(
+                "PresA11y" to WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                "PresApp" to WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                "PresDef" to null
             )
-            for (pType in presTypes) {
+            for ((tag, pType) in presTypes) {
+                if (tag in failed) continue
                 try {
                     val base = if (pType == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) this else (applicationContext ?: this)
-                    val pres = object : Presentation(base, display) {}
+                    val pres = object : Presentation(base, display, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen) {}
                     val view = CursorView(pres.context, sz)
                     val win = pres.window
                     if (win != null) {
@@ -1147,28 +1225,33 @@ class RemoteAccessibilityService : AccessibilityService() {
                                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                         )
                         win.setGravity(Gravity.TOP or Gravity.START)
+                    }
+                    pres.setContentView(view)
+                    pres.show()
+                    if (win != null) {
                         win.setLayout(view.prefW, view.prefH)
                         win.attributes = win.attributes.apply {
                             this.x = posX
                             this.y = posY
                         }
                     }
-                    pres.setContentView(view)
-                    pres.show()
                     cursorLp = win?.attributes
                     cursor = view
                     cursorWm = null
                     cursorPresentation = pres
                     cursorDisplayId = display.displayId
+                    lastOverlayMethod = tag
                     lastOverlayError = ""
+                    scheduleVerifyOverlay(display.displayId, tag)
                     return true
                 } catch (e: Exception) {
-                    lastErr = "${e.javaClass.simpleName}: ${e.message ?: ""}"
+                    lastErr = "$tag:${e.javaClass.simpleName}:${e.message ?: ""}"
                 }
             }
         }
 
         lastOverlayError = lastErr
+        lastOverlayMethod = ""
         return false
     }
 
@@ -1415,10 +1498,14 @@ class RemoteAccessibilityService : AccessibilityService() {
         val posY = (y + 2).coerceIn(0, (sz.y - 4).coerceAtLeast(0))
 
         if (shizukuOverlayActive && targetDisplayId != Display.DEFAULT_DISPLAY) {
-            ShizukuBridge.showOverlayCursor(targetDisplayId, posX, posY) { ok ->
+            ShizukuBridge.showOverlayCursor(targetDisplayId, posX, posY) { ok, st ->
                 if (!ok) {
                     shizukuOverlayActive = false
                     secondaryOverlayBlocked = true
+                    if (st.isNotEmpty()) lastOverlayError = st
+                    notifyDisplayState()
+                } else if (st.isNotEmpty() && st != shizukuOverlayStatus) {
+                    shizukuOverlayStatus = st
                     notifyDisplayState()
                 }
             }
@@ -1440,21 +1527,33 @@ class RemoteAccessibilityService : AccessibilityService() {
                 shizukuOverlayActive = true
                 cursorDisplayId = targetDisplayId
                 secondaryOverlayBlocked = true
-                ShizukuBridge.showOverlayCursor(targetDisplayId, posX, posY) { ok ->
+                ShizukuBridge.showOverlayCursor(targetDisplayId, posX, posY) { ok, st ->
                     shizukuOverlayActive = ok
                     if (ok && activeDisplayId == targetDisplayId) {
                         secondaryOverlayBlocked = false
+                        shizukuOverlayStatus = st.ifEmpty { "Shizuku" }
                         lastOverlayError = ""
                         notifyDisplayState()
+                        main.postDelayed({
+                            if (shizukuOverlayActive && activeDisplayId == targetDisplayId) {
+                                ShizukuBridge.getOverlayStatusAsync { latest ->
+                                    if (latest.isNotEmpty() && latest != shizukuOverlayStatus) {
+                                        shizukuOverlayStatus = latest
+                                        notifyDisplayState()
+                                    }
+                                }
+                            }
+                        }, 240L)
                     } else if (!ok) {
                         secondaryOverlayBlocked = true
+                        if (st.isNotEmpty()) lastOverlayError = st
                         notifyDisplayState()
                     }
                 }
             } else {
                 val wasBlocked = secondaryOverlayBlocked
                 secondaryOverlayBlocked = targetDisplayId != Display.DEFAULT_DISPLAY && !added
-                if (wasBlocked != secondaryOverlayBlocked) {
+                if (wasBlocked != secondaryOverlayBlocked || secondaryOverlayBlocked) {
                     notifyDisplayState()
                 }
             }
@@ -1500,8 +1599,10 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun removeCursor() {
+        main.removeCallbacksAndMessages(verifyOverlayToken)
         if (shizukuOverlayActive) {
             shizukuOverlayActive = false
+            shizukuOverlayStatus = ""
             ShizukuBridge.hideOverlayCursor()
         }
         val pres = cursorPresentation
@@ -1527,16 +1628,22 @@ class RemoteAccessibilityService : AccessibilityService() {
 
 /** Puntero de ratón: flecha blanca con borde negro y sombra, siempre visible en cualquier pantalla. */
 class CursorView(context: Context, displaySize: Point? = null) : View(context) {
+    var drawCount = 0
+        private set
+    var attachedDisplayId: Int? = null
+        private set
+
     private val minDim = displaySize?.let { minOf(it.x, it.y) } ?: 0
     val prefW: Int = maxOf(
-        (24 * context.resources.displayMetrics.density).toInt(),
-        (minDim * 0.025f).toInt(),
-        28
+        (28 * context.resources.displayMetrics.density).toInt(),
+        (minDim * 0.032f).toInt(),
+        36
     )
     val prefH: Int = (prefW * 1.5f).toInt()
 
-    init {
-        setLayerType(LAYER_TYPE_SOFTWARE, null)
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        attachedDisplayId = display?.displayId
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -1550,7 +1657,7 @@ class CursorView(context: Context, displaySize: Point? = null) : View(context) {
     private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFF000000.toInt()
         style = Paint.Style.STROKE
-        strokeWidth = (2f * context.resources.displayMetrics.density).coerceAtLeast(3f)
+        strokeWidth = (2.5f * context.resources.displayMetrics.density).coerceAtLeast(3f)
         strokeJoin = Paint.Join.ROUND
     }
     private val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -1559,6 +1666,7 @@ class CursorView(context: Context, displaySize: Point? = null) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
+        drawCount++
         val w = width.toFloat()
         val h = height.toFloat()
         val p = Path()

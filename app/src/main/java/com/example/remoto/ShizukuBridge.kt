@@ -182,7 +182,7 @@ object ShizukuBridge {
         val a = args ?: Shizuku.UserServiceArgs(ComponentName(ctx, ShizukuInputService::class.java))
             .daemon(false)
             .processNameSuffix("shizuku_input")
-            .version(6)
+            .version(7)
             .debuggable(BuildConfig.DEBUG)
             .also { args = it }
         try {
@@ -253,22 +253,52 @@ object ShizukuBridge {
         return true
     }
 
-    fun showOverlayCursor(displayId: Int, x: Int, y: Int, onResult: ((Boolean) -> Unit)? = null): Boolean {
+    @Volatile
+    private var pendingOverlay: Triple<Int, Int, Int>? = null
+    @Volatile
+    private var overlayRunning = false
+
+    fun showOverlayCursor(displayId: Int, x: Int, y: Int, onResult: ((Boolean, String) -> Unit)? = null): Boolean {
         val s = service ?: return false
+        pendingOverlay = Triple(displayId, x, y)
+        if (overlayRunning) return true
+        overlayRunning = true
         io.execute {
-            val ok = try {
-                s.showOverlayCursor(displayId, x, y)
-            } catch (_: Throwable) {
-                false
+            while (true) {
+                val target = pendingOverlay ?: break
+                pendingOverlay = null
+                val ok = try {
+                    s.showOverlayCursor(target.first, target.second, target.third)
+                } catch (_: Throwable) {
+                    false
+                }
+                val status = try {
+                    s.overlayStatus ?: ""
+                } catch (_: Throwable) {
+                    ""
+                }
+                if (pendingOverlay == null) {
+                    if (onResult != null) {
+                        main.post { onResult(ok, status) }
+                    }
+                    break
+                }
             }
-            if (onResult != null) {
-                main.post { onResult(ok) }
-            }
+            overlayRunning = false
         }
         return true
     }
 
+    fun getOverlayStatusAsync(onResult: (String) -> Unit) {
+        val s = service ?: return
+        io.execute {
+            val status = try { s.overlayStatus ?: "" } catch (_: Throwable) { "" }
+            main.post { onResult(status) }
+        }
+    }
+
     fun hideOverlayCursor() {
+        pendingOverlay = null
         val s = service ?: return
         io.execute {
             try {

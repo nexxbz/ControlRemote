@@ -11,5 +11,6 @@ interface IShizukuInput {
     boolean sendKey(int keyCode);
     boolean showOverlayCursor(int displayId, int x, int y);
     void hideOverlayCursor();
+    String getOverlayStatus();
     void destroy();
 }
