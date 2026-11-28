@@ -221,6 +221,13 @@ fun RemoteScreen(
                         )
                     } else if (displayCount > 1 && displayNote.isNotEmpty()) {
                         Text(displayNote, color = Color(0xFFA0A8B8), fontSize = 12.sp, maxLines = 2)
+                    } else if (displayCount <= 1) {
+                        Text(
+                            "1 pantalla detectada (abre scrcpy --new-display para ver Pantalla 2)",
+                            color = Color.Gray,
+                            fontSize = 11.sp,
+                            maxLines = 1
+                        )
                     }
                     TouchpadArea(controller, settings, Modifier.weight(1f).fillMaxWidth())
                 }

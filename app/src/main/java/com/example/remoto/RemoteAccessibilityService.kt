@@ -174,10 +174,12 @@ class RemoteAccessibilityService : AccessibilityService() {
         val listener = object : DisplayManager.DisplayListener {
             override fun onDisplayAdded(displayId: Int) {
                 failedOverlayMethods.remove(displayId)
+                shizukuOverlayBlockedUntil.remove(displayId)
                 notifyDisplayState()
             }
             override fun onDisplayRemoved(displayId: Int) {
                 failedOverlayMethods.remove(displayId)
+                shizukuOverlayBlockedUntil.remove(displayId)
                 if (activeDisplayId == displayId) {
                     activeDisplayId = Display.DEFAULT_DISPLAY
                     manualDisplaySelected = false
@@ -278,7 +280,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                 out.flush()
                 return
             }
-            out.write("OK ${Build.MODEL}|${Build.VERSION.SDK_INT}\n".toByteArray())
+            out.write("OK ${Build.MODEL}|${Build.VERSION.SDK_INT}|${BuildConfig.VERSION_NAME}\n".toByteArray())
             out.flush()
             outRef = out
             clients.add(out)
@@ -963,6 +965,12 @@ class RemoteAccessibilityService : AccessibilityService() {
         for (d in dm.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)) {
             if (d.isValid) byId[d.displayId] = d
         }
+        try {
+            for (d in dm.getDisplays("android.hardware.display.category.ALL_INCLUDING_DISABLED")) {
+                if (d.isValid && d.state != Display.STATE_OFF) byId[d.displayId] = d
+            }
+        } catch (_: Exception) {
+        }
         if (Build.VERSION.SDK_INT >= 30) {
             try {
                 val map = windowsOnAllDisplays
@@ -1051,11 +1059,15 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
     }
 
+    private val shizukuOverlayBlockedUntil = mutableMapOf<Int, Long>()
+
     private fun selectDisplayByIndex(index: Int) {
         val displays = allDisplays()
         if (displays.isEmpty()) return
         val target = displays[index.coerceIn(0, displays.lastIndex)]
         manualDisplaySelected = true
+        failedOverlayMethods.remove(target.displayId)
+        shizukuOverlayBlockedUntil.remove(target.displayId)
         switchActiveDisplay(target, recenter = target.displayId != activeDisplayId)
         lastPointerMove = System.currentTimeMillis()
         if (useKernelUhid(target.displayId)) {
@@ -1523,7 +1535,8 @@ class RemoteAccessibilityService : AccessibilityService() {
             } else {
                 false
             }
-            if (!added && targetDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.isReady()) {
+            val blockedUntil = shizukuOverlayBlockedUntil[targetDisplayId] ?: 0L
+            if (!added && targetDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.isReady() && SystemClock.uptimeMillis() >= blockedUntil) {
                 shizukuOverlayActive = true
                 cursorDisplayId = targetDisplayId
                 secondaryOverlayBlocked = true
@@ -1537,14 +1550,27 @@ class RemoteAccessibilityService : AccessibilityService() {
                         main.postDelayed({
                             if (shizukuOverlayActive && activeDisplayId == targetDisplayId) {
                                 ShizukuBridge.getOverlayStatusAsync { latest ->
-                                    if (latest.isNotEmpty() && latest != shizukuOverlayStatus) {
+                                    if (latest.startsWith("ERR:") || latest.contains(":dr=0")) {
+                                        ShizukuBridge.showOverlayCursor(targetDisplayId, cx.toInt() + 2, cy.toInt() + 2) { ok2, st2 ->
+                                            shizukuOverlayActive = ok2
+                                            if (ok2) {
+                                                shizukuOverlayStatus = st2.ifEmpty { "Shizuku" }
+                                            } else {
+                                                shizukuOverlayBlockedUntil[targetDisplayId] = SystemClock.uptimeMillis() + 3000L
+                                                secondaryOverlayBlocked = true
+                                                if (st2.isNotEmpty()) lastOverlayError = st2
+                                            }
+                                            notifyDisplayState()
+                                        }
+                                    } else if (latest.isNotEmpty() && latest != shizukuOverlayStatus) {
                                         shizukuOverlayStatus = latest
                                         notifyDisplayState()
                                     }
                                 }
                             }
-                        }, 240L)
+                        }, 260L)
                     } else if (!ok) {
+                        shizukuOverlayBlockedUntil[targetDisplayId] = SystemClock.uptimeMillis() + 3000L
                         secondaryOverlayBlocked = true
                         if (st.isNotEmpty()) lastOverlayError = st
                         notifyDisplayState()

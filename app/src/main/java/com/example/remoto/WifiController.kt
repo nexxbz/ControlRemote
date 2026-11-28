@@ -113,11 +113,14 @@ class WifiController : RemoteController {
                 s.soTimeout = 0
                 socket = s
                 out = o
-                val sdk = reply.substringAfter('|', "").trim().toIntOrNull()
+                val fields = reply.removePrefix("OK").trim().split("|")
+                val sdk = fields.getOrNull(1)?.trim()?.toIntOrNull()
+                val recVer = fields.getOrNull(2)?.trim().orEmpty()
+                val verSuffix = if (recVer.isNotEmpty()) " · Receptor v$recVer" else ""
                 infoText = when {
-                    sdk == null -> "Conectado"
-                    sdk >= 33 -> "Conectado · Android ${androidVersionName(sdk)}"
-                    else -> "Conectado · Android ${androidVersionName(sdk)} (cruceta en modo compatible)"
+                    sdk == null -> "Conectado$verSuffix"
+                    sdk >= 33 -> "Conectado · Android ${androidVersionName(sdk)}$verSuffix"
+                    else -> "Conectado · Android ${androidVersionName(sdk)} (cruceta compatible)$verSuffix"
                 }
                 startReader(s, reader)
                 0
