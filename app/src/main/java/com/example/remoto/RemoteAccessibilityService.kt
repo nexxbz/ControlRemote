@@ -88,6 +88,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var cursorLp: WindowManager.LayoutParams? = null
     private var cursorWm: WindowManager? = null
     private var cursorPresentation: Presentation? = null
+    private var shizukuOverlayActive = false
     private var activeDisplayId: Int = Display.DEFAULT_DISPLAY
     private var cursorDisplayId: Int = Display.DEFAULT_DISPLAY
     private var cx = 0f
@@ -102,6 +103,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private val hideCursor = Runnable {
         cursor?.visibility = View.GONE
         cursorPresentation?.window?.decorView?.visibility = View.GONE
+        if (shizukuOverlayActive) ShizukuBridge.hideOverlayCursor()
         cursorActive = false
     }
     private var cpuLock: PowerManager.WakeLock? = null
@@ -999,6 +1001,11 @@ class RemoteAccessibilityService : AccessibilityService() {
     private fun hideOverlayKeepActive() {
         main.removeCallbacks(hideCursor)
         cursor?.visibility = View.GONE
+        cursorPresentation?.window?.decorView?.visibility = View.GONE
+        if (shizukuOverlayActive) {
+            shizukuOverlayActive = false
+            ShizukuBridge.hideOverlayCursor()
+        }
         cursorActive = true
         if (secondaryOverlayBlocked) {
             secondaryOverlayBlocked = false
@@ -1403,6 +1410,24 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
         val x = cx.toInt()
         val y = cy.toInt()
+        val sz = if (display != null) displaySize(display) else activeDisplaySize()
+        val posX = (x + 2).coerceIn(0, (sz.x - 4).coerceAtLeast(0))
+        val posY = (y + 2).coerceIn(0, (sz.y - 4).coerceAtLeast(0))
+
+        if (shizukuOverlayActive && targetDisplayId != Display.DEFAULT_DISPLAY) {
+            ShizukuBridge.showOverlayCursor(targetDisplayId, posX, posY) { ok ->
+                if (!ok) {
+                    shizukuOverlayActive = false
+                    secondaryOverlayBlocked = true
+                    notifyDisplayState()
+                }
+            }
+            cursorActive = true
+            main.removeCallbacks(hideCursor)
+            main.postDelayed(hideCursor, 15000)
+            return
+        }
+
         val existing = cursor
         val lp = cursorLp
         if (existing == null || lp == null) {
@@ -1411,15 +1436,31 @@ class RemoteAccessibilityService : AccessibilityService() {
             } else {
                 false
             }
-            val wasBlocked = secondaryOverlayBlocked
-            secondaryOverlayBlocked = targetDisplayId != Display.DEFAULT_DISPLAY && !added
-            if (wasBlocked != secondaryOverlayBlocked) {
-                notifyDisplayState()
+            if (!added && targetDisplayId != Display.DEFAULT_DISPLAY && ShizukuBridge.isReady()) {
+                shizukuOverlayActive = true
+                cursorDisplayId = targetDisplayId
+                secondaryOverlayBlocked = true
+                ShizukuBridge.showOverlayCursor(targetDisplayId, posX, posY) { ok ->
+                    shizukuOverlayActive = ok
+                    if (ok && activeDisplayId == targetDisplayId) {
+                        secondaryOverlayBlocked = false
+                        lastOverlayError = ""
+                        notifyDisplayState()
+                    } else if (!ok) {
+                        secondaryOverlayBlocked = true
+                        notifyDisplayState()
+                    }
+                }
+            } else {
+                val wasBlocked = secondaryOverlayBlocked
+                secondaryOverlayBlocked = targetDisplayId != Display.DEFAULT_DISPLAY && !added
+                if (wasBlocked != secondaryOverlayBlocked) {
+                    notifyDisplayState()
+                }
             }
         } else {
-            val sz = if (display != null) displaySize(display) else activeDisplaySize()
-            lp.x = (x + 2).coerceIn(0, (sz.x - 4).coerceAtLeast(0))
-            lp.y = (y + 2).coerceIn(0, (sz.y - 4).coerceAtLeast(0))
+            lp.x = posX
+            lp.y = posY
             existing.visibility = View.VISIBLE
             cursorPresentation?.window?.decorView?.visibility = View.VISIBLE
             try {
@@ -1453,11 +1494,16 @@ class RemoteAccessibilityService : AccessibilityService() {
         main.removeCallbacks(hideCursor)
         cursor?.visibility = View.GONE
         cursorPresentation?.window?.decorView?.visibility = View.GONE
+        if (shizukuOverlayActive) ShizukuBridge.hideOverlayCursor()
         cursorActive = false
         lastPointerMove = 0L
     }
 
     private fun removeCursor() {
+        if (shizukuOverlayActive) {
+            shizukuOverlayActive = false
+            ShizukuBridge.hideOverlayCursor()
+        }
         val pres = cursorPresentation
         cursorPresentation = null
         val view = cursor
@@ -1488,6 +1534,14 @@ class CursorView(context: Context, displaySize: Point? = null) : View(context) {
         28
     )
     val prefH: Int = (prefW * 1.5f).toInt()
+
+    init {
+        setLayerType(LAYER_TYPE_SOFTWARE, null)
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(resolveSize(prefW, widthMeasureSpec), resolveSize(prefH, heightMeasureSpec))
+    }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt()

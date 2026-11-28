@@ -1,18 +1,34 @@
 package com.example.remoto
 
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
+import android.graphics.Point
+import android.hardware.display.DisplayManager
+import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
+import android.view.Display
+import android.view.Gravity
 import android.view.InputDevice
 import android.view.InputEvent
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
+import android.view.View
+import android.view.WindowManager
 import androidx.annotation.Keep
 import java.io.FileDescriptor
 import java.lang.reflect.Method
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Servicio privilegiado vía Shizuku (UID shell / root):
@@ -33,6 +49,18 @@ class ShizukuInputService : IShizukuInput.Stub() {
     private var injectMethod: Method? = null
 
     private val lock = Any()
+    private val cursorThread = HandlerThread("shizuku_cursor").apply { start() }
+    private val cursorHandler = Handler(cursorThread.looper)
+    private var shellCtx: Context? = null
+    private var shellOverlayGranted = false
+    private var shellCursorView: View? = null
+    private var shellCursorLp: WindowManager.LayoutParams? = null
+    private var shellCursorWm: WindowManager? = null
+    private var shellCursorDisplayId: Int = -1
+    private var shellOverlayErr: String = ""
+    private val hideShellCursor = Runnable {
+        shellCursorView?.visibility = View.GONE
+    }
 
     init {
         initInputManager()
@@ -201,6 +229,156 @@ class ShizukuInputService : IShizukuInput.Stub() {
         return sendUhidReport(0, 0, 0)
     }
 
+    private fun resolveShellContext(): Context? {
+        shellCtx?.let { return it }
+        return try {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = try {
+                atClass.getMethod("currentActivityThread").invoke(null)
+            } catch (_: Throwable) {
+                null
+            } ?: atClass.getMethod("systemMain").invoke(null)
+            val sysCtx = atClass.getMethod("getSystemContext").invoke(at) as? Context ?: return null
+            val ctx = sysCtx.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY)
+            shellCtx = ctx
+            ctx
+        } catch (t: Throwable) {
+            shellOverlayErr = "ctx:${t.javaClass.simpleName}"
+            null
+        }
+    }
+
+    private fun removeShellCursorOnThread() {
+        cursorHandler.removeCallbacks(hideShellCursor)
+        val v = shellCursorView
+        val wm = shellCursorWm
+        shellCursorView = null
+        shellCursorLp = null
+        shellCursorWm = null
+        shellCursorDisplayId = -1
+        if (v != null && wm != null) {
+            try {
+                wm.removeView(v)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun showOverlayCursorOnThread(displayId: Int, x: Int, y: Int): Boolean {
+        if (shellCursorView != null && shellCursorDisplayId == displayId) {
+            val v = shellCursorView
+            val lp = shellCursorLp
+            val wm = shellCursorWm
+            if (v != null && lp != null && wm != null) {
+                lp.x = x
+                lp.y = y
+                v.visibility = View.VISIBLE
+                try {
+                    wm.updateViewLayout(v, lp)
+                    v.invalidate()
+                    cursorHandler.removeCallbacks(hideShellCursor)
+                    cursorHandler.postDelayed(hideShellCursor, 15000L)
+                    return true
+                } catch (_: Throwable) {
+                    removeShellCursorOnThread()
+                }
+            }
+        } else {
+            removeShellCursorOnThread()
+        }
+
+        if (!shellOverlayGranted) {
+            shellOverlayGranted = grantOverlayPermission("com.android.shell")
+        }
+        val ctx = resolveShellContext() ?: return false
+        val dm = ctx.getSystemService(DisplayManager::class.java) ?: return false
+        val display = dm.getDisplay(displayId) ?: return false
+        val sz = Point()
+        @Suppress("DEPRECATION")
+        display.getRealSize(sz)
+        val minDim = minOf(sz.x, sz.y).coerceAtLeast(0)
+
+        val candidates = mutableListOf<Pair<WindowManager, Context>>()
+        if (Build.VERSION.SDK_INT >= 31) {
+            try {
+                val wCtx = ctx.createWindowContext(display, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+                wCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(it to wCtx) }
+            } catch (_: Throwable) {
+            }
+        }
+        try {
+            val dCtx = ctx.createDisplayContext(display)
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    val wCtx = dCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
+                    wCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(it to wCtx) }
+                } catch (_: Throwable) {
+                }
+            }
+            dCtx.getSystemService(WindowManager::class.java)?.let { candidates.add(it to dCtx) }
+        } catch (_: Throwable) {
+        }
+
+        for ((wm, vCtx) in candidates) {
+            val view = ShellArrowView(vCtx, minDim)
+            val lp = WindowManager.LayoutParams(
+                view.prefW, view.prefH,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                this.x = x
+                this.y = y
+            }
+            try {
+                wm.addView(view, lp)
+                shellCursorView = view
+                shellCursorLp = lp
+                shellCursorWm = wm
+                shellCursorDisplayId = displayId
+                shellOverlayErr = ""
+                cursorHandler.removeCallbacks(hideShellCursor)
+                cursorHandler.postDelayed(hideShellCursor, 15000L)
+                return true
+            } catch (t: Throwable) {
+                shellOverlayErr = "${t.javaClass.simpleName}:${t.message ?: ""}"
+            }
+        }
+        return false
+    }
+
+    override fun showOverlayCursor(displayId: Int, x: Int, y: Int): Boolean {
+        val latch = CountDownLatch(1)
+        var ok = false
+        val posted = cursorHandler.post {
+            try {
+                ok = showOverlayCursorOnThread(displayId, x, y)
+            } catch (t: Throwable) {
+                shellOverlayErr = t.javaClass.simpleName
+                ok = false
+            } finally {
+                latch.countDown()
+            }
+        }
+        if (!posted) return false
+        return try {
+            latch.await(1500, TimeUnit.MILLISECONDS) && ok
+        } catch (_: InterruptedException) {
+            false
+        }
+    }
+
+    override fun hideOverlayCursor() {
+        cursorHandler.post {
+            cursorHandler.removeCallbacks(hideShellCursor)
+            shellCursorView?.visibility = View.GONE
+        }
+    }
+
     override fun sendKey(keyCode: Int): Boolean {
         val now = SystemClock.uptimeMillis()
         val down = KeyEvent(
@@ -218,6 +396,10 @@ class ShizukuInputService : IShizukuInput.Stub() {
 
     override fun destroy() {
         uhidActive = false
+        cursorHandler.post {
+            removeShellCursorOnThread()
+            cursorThread.quitSafely()
+        }
         val fd = uhidFd
         uhidFd = null
         if (fd != null) {
@@ -233,6 +415,58 @@ class ShizukuInputService : IShizukuInput.Stub() {
             }
         }
         System.exit(0)
+    }
+
+    private class ShellArrowView(context: Context, minDim: Int) : View(context) {
+        val prefW: Int = maxOf(
+            (24 * context.resources.displayMetrics.density).toInt(),
+            (minDim * 0.025f).toInt(),
+            28
+        )
+        val prefH: Int = (prefW * 1.5f).toInt()
+
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt()
+            style = Paint.Style.FILL
+        }
+        private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFF000000.toInt()
+            style = Paint.Style.STROKE
+            strokeWidth = (2f * context.resources.displayMetrics.density).coerceAtLeast(3f)
+            strokeJoin = Paint.Join.ROUND
+        }
+        private val shadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x77000000
+            style = Paint.Style.FILL
+        }
+
+        init {
+            setLayerType(LAYER_TYPE_SOFTWARE, null)
+        }
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            setMeasuredDimension(resolveSize(prefW, widthMeasureSpec), resolveSize(prefH, heightMeasureSpec))
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val p = Path()
+            p.moveTo(2f, 2f)
+            p.lineTo(2f, h * 0.82f)
+            p.lineTo(w * 0.27f, h * 0.64f)
+            p.lineTo(w * 0.45f, h * 0.97f)
+            p.lineTo(w * 0.62f, h * 0.89f)
+            p.lineTo(w * 0.45f, h * 0.57f)
+            p.lineTo(w * 0.82f, h * 0.57f)
+            p.close()
+            canvas.save()
+            canvas.translate(2f, 3f)
+            canvas.drawPath(p, shadow)
+            canvas.restore()
+            canvas.drawPath(p, fill)
+            canvas.drawPath(p, edge)
+        }
     }
 
     companion object {

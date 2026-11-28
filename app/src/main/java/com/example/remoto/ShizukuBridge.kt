@@ -182,7 +182,7 @@ object ShizukuBridge {
         val a = args ?: Shizuku.UserServiceArgs(ComponentName(ctx, ShizukuInputService::class.java))
             .daemon(false)
             .processNameSuffix("shizuku_input")
-            .version(4)
+            .version(6)
             .debuggable(BuildConfig.DEBUG)
             .also { args = it }
         try {
@@ -251,6 +251,31 @@ object ShizukuBridge {
             }
         }
         return true
+    }
+
+    fun showOverlayCursor(displayId: Int, x: Int, y: Int, onResult: ((Boolean) -> Unit)? = null): Boolean {
+        val s = service ?: return false
+        io.execute {
+            val ok = try {
+                s.showOverlayCursor(displayId, x, y)
+            } catch (_: Throwable) {
+                false
+            }
+            if (onResult != null) {
+                main.post { onResult(ok) }
+            }
+        }
+        return true
+    }
+
+    fun hideOverlayCursor() {
+        val s = service ?: return
+        io.execute {
+            try {
+                s.hideOverlayCursor()
+            } catch (_: Throwable) {
+            }
+        }
     }
 
     fun sendKey(keyCode: Int): Boolean {
