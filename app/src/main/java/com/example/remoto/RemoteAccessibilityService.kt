@@ -2,15 +2,18 @@ package com.example.remoto
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.Presentation
 import android.content.Context
 import android.content.Intent
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.PixelFormat
+import android.graphics.drawable.ColorDrawable
 import android.hardware.display.DisplayManager
 import android.media.AudioManager
 import android.net.nsd.NsdManager
@@ -84,6 +87,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private var cursor: CursorView? = null
     private var cursorLp: WindowManager.LayoutParams? = null
     private var cursorWm: WindowManager? = null
+    private var cursorPresentation: Presentation? = null
     private var activeDisplayId: Int = Display.DEFAULT_DISPLAY
     private var cursorDisplayId: Int = Display.DEFAULT_DISPLAY
     private var cx = 0f
@@ -97,6 +101,7 @@ class RemoteAccessibilityService : AccessibilityService() {
     private class Cand(val node: AccessibilityNodeInfo, val rect: Rect)
     private val hideCursor = Runnable {
         cursor?.visibility = View.GONE
+        cursorPresentation?.window?.decorView?.visibility = View.GONE
         cursorActive = false
     }
     private var cpuLock: PowerManager.WakeLock? = null
@@ -1026,18 +1031,36 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     private fun tryAddCursorView(display: Display, x: Int, y: Int): Boolean {
+        val sz = displaySize(display)
+        val posX = (x + 2).coerceIn(0, (sz.x - 4).coerceAtLeast(0))
+        val posY = (y + 2).coerceIn(0, (sz.y - 4).coerceAtLeast(0))
         val attempts = mutableListOf<Triple<WindowManager, Context, Int>>()
         if (display.displayId == Display.DEFAULT_DISPLAY) {
             val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             attempts.add(Triple(wm, this, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY))
         } else {
-            val baseCtx = applicationContext ?: this
-            val displayCtx = try {
-                baseCtx.createDisplayContext(display)
-            } catch (_: Exception) {
-                try { createDisplayContext(display) } catch (_: Exception) { null }
+            val appCtx = applicationContext ?: this
+            if (Build.VERSION.SDK_INT >= 31) {
+                for (t in listOf(
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+                )) {
+                    for (base in listOf(this, appCtx)) {
+                        try {
+                            val winCtx = base.createWindowContext(display, t, null)
+                            winCtx.getSystemService(WindowManager::class.java)?.let { wm ->
+                                attempts.add(Triple(wm, winCtx, t))
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
             }
-            if (displayCtx != null) {
+            val displayCtxs = listOfNotNull(
+                try { appCtx.createDisplayContext(display) } catch (_: Exception) { null },
+                try { createDisplayContext(display) } catch (_: Exception) { null }
+            )
+            for (displayCtx in displayCtxs) {
                 if (Build.VERSION.SDK_INT >= 30) {
                     try {
                         val winCtx = displayCtx.createWindowContext(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, null)
@@ -1067,7 +1090,7 @@ class RemoteAccessibilityService : AccessibilityService() {
 
         var lastErr = ""
         for ((wm, ctx, type) in attempts) {
-            val view = CursorView(ctx)
+            val view = CursorView(ctx, sz)
             val params = WindowManager.LayoutParams(
                 view.prefW, view.prefH,
                 type,
@@ -1078,13 +1101,14 @@ class RemoteAccessibilityService : AccessibilityService() {
                 PixelFormat.TRANSLUCENT
             )
             params.gravity = Gravity.TOP or Gravity.START
-            params.x = x
-            params.y = y
+            params.x = posX
+            params.y = posY
             try {
                 wm.addView(view, params)
                 cursor = view
                 cursorLp = params
                 cursorWm = wm
+                cursorPresentation = null
                 cursorDisplayId = display.displayId
                 lastOverlayError = ""
                 return true
@@ -1092,6 +1116,51 @@ class RemoteAccessibilityService : AccessibilityService() {
                 lastErr = "${e.javaClass.simpleName}: ${e.message ?: ""}"
             }
         }
+
+        if (display.displayId != Display.DEFAULT_DISPLAY) {
+            val presTypes = listOf<Int?>(
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                null
+            )
+            for (pType in presTypes) {
+                try {
+                    val base = if (pType == WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY) this else (applicationContext ?: this)
+                    val pres = object : Presentation(base, display) {}
+                    val view = CursorView(pres.context, sz)
+                    val win = pres.window
+                    if (win != null) {
+                        if (pType != null) win.setType(pType)
+                        win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                        win.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                        win.addFlags(
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        )
+                        win.setGravity(Gravity.TOP or Gravity.START)
+                        win.setLayout(view.prefW, view.prefH)
+                        win.attributes = win.attributes.apply {
+                            this.x = posX
+                            this.y = posY
+                        }
+                    }
+                    pres.setContentView(view)
+                    pres.show()
+                    cursorLp = win?.attributes
+                    cursor = view
+                    cursorWm = null
+                    cursorPresentation = pres
+                    cursorDisplayId = display.displayId
+                    lastOverlayError = ""
+                    return true
+                } catch (e: Exception) {
+                    lastErr = "${e.javaClass.simpleName}: ${e.message ?: ""}"
+                }
+            }
+        }
+
         lastOverlayError = lastErr
         return false
     }
@@ -1119,15 +1188,19 @@ class RemoteAccessibilityService : AccessibilityService() {
         lastKnownDisplayCount = displays.size
         if (!cursorActive && displays.isNotEmpty()) {
             val activeList = displays.filter { it.state != Display.STATE_OFF }.ifEmpty { displays }
-            val targetId = focusedDisplayId()?.takeIf { id -> displays.any { it.displayId == id } }
-                ?: activeList.firstOrNull { it.displayId == activeDisplayId }?.displayId
-                ?: activeList[0].displayId
-            if (targetId != activeDisplayId) {
-                val target = displays.first { it.displayId == targetId }
-                switchActiveDisplay(target, recenter = true)
-                displayChanged = true
+            val keepCurrent = manualDisplaySelected && displays.any { it.displayId == activeDisplayId }
+            if (!keepCurrent) {
+                val targetId = focusedDisplayId()?.takeIf { id -> displays.any { it.displayId == id } }
+                    ?: activeList.firstOrNull { it.displayId == activeDisplayId }?.displayId
+                    ?: activeList[0].displayId
+                if (targetId != activeDisplayId) {
+                    val target = displays.first { it.displayId == targetId }
+                    switchActiveDisplay(target, recenter = true)
+                    displayChanged = true
+                }
             }
         } else if (displays.isNotEmpty() && displays.none { it.displayId == activeDisplayId }) {
+            manualDisplaySelected = false
             switchActiveDisplay(displays[0], recenter = true)
             displayChanged = true
         }
@@ -1144,6 +1217,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                     val next = displays[idx + 1]
                     val nextSize = displaySize(next)
                     val yRatio = (ny / size.y.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    manualDisplaySelected = true
                     switchActiveDisplay(next, recenter = false)
                     cx = (nx - size.x.toFloat()).coerceIn(0f, nextSize.x.toFloat())
                     cy = (yRatio * nextSize.y.toFloat()).coerceIn(0f, nextSize.y.toFloat())
@@ -1159,6 +1233,7 @@ class RemoteAccessibilityService : AccessibilityService() {
                     val prev = displays[idx - 1]
                     val prevSize = displaySize(prev)
                     val yRatio = (ny / size.y.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                    manualDisplaySelected = true
                     switchActiveDisplay(prev, recenter = false)
                     cx = (prevSize.x.toFloat() + nx).coerceIn(0f, prevSize.x.toFloat())
                     cy = (yRatio * prevSize.y.toFloat()).coerceIn(0f, prevSize.y.toFloat())
@@ -1342,10 +1417,19 @@ class RemoteAccessibilityService : AccessibilityService() {
                 notifyDisplayState()
             }
         } else {
-            lp.x = x
-            lp.y = y
+            val sz = if (display != null) displaySize(display) else activeDisplaySize()
+            lp.x = (x + 2).coerceIn(0, (sz.x - 4).coerceAtLeast(0))
+            lp.y = (y + 2).coerceIn(0, (sz.y - 4).coerceAtLeast(0))
+            existing.visibility = View.VISIBLE
+            cursorPresentation?.window?.decorView?.visibility = View.VISIBLE
             try {
-                cursorWm?.updateViewLayout(existing, lp)
+                val pres = cursorPresentation
+                if (pres != null) {
+                    pres.window?.attributes = lp
+                } else {
+                    cursorWm?.updateViewLayout(existing, lp)
+                }
+                existing.invalidate()
             } catch (_: Exception) {
                 removeCursor()
             }
@@ -1355,9 +1439,10 @@ class RemoteAccessibilityService : AccessibilityService() {
             }
         }
         cursor?.visibility = View.VISIBLE
+        cursorPresentation?.window?.decorView?.visibility = View.VISIBLE
         cursorActive = true
         main.removeCallbacks(hideCursor)
-        main.postDelayed(hideCursor, 8000)
+        main.postDelayed(hideCursor, 15000)
     }
 
     private fun hideCursorNow() {
@@ -1367,17 +1452,25 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
         main.removeCallbacks(hideCursor)
         cursor?.visibility = View.GONE
+        cursorPresentation?.window?.decorView?.visibility = View.GONE
         cursorActive = false
         lastPointerMove = 0L
     }
 
     private fun removeCursor() {
+        val pres = cursorPresentation
+        cursorPresentation = null
         val view = cursor
         cursor = null
         cursorLp = null
         val wm = cursorWm ?: (getSystemService(Context.WINDOW_SERVICE) as WindowManager)
         cursorWm = null
-        if (view != null) {
+        if (pres != null) {
+            try {
+                pres.dismiss()
+            } catch (_: Exception) {
+            }
+        } else if (view != null) {
             try {
                 wm.removeView(view)
             } catch (_: Exception) {
@@ -1387,9 +1480,14 @@ class RemoteAccessibilityService : AccessibilityService() {
 }
 
 /** Puntero de ratón: flecha blanca con borde negro y sombra, siempre visible en cualquier pantalla. */
-class CursorView(context: Context) : View(context) {
-    val prefW: Int = (24 * context.resources.displayMetrics.density).toInt().coerceAtLeast(24)
-    val prefH: Int = (36 * context.resources.displayMetrics.density).toInt().coerceAtLeast(36)
+class CursorView(context: Context, displaySize: Point? = null) : View(context) {
+    private val minDim = displaySize?.let { minOf(it.x, it.y) } ?: 0
+    val prefW: Int = maxOf(
+        (24 * context.resources.displayMetrics.density).toInt(),
+        (minDim * 0.025f).toInt(),
+        28
+    )
+    val prefH: Int = (prefW * 1.5f).toInt()
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFFFFFFF.toInt()
